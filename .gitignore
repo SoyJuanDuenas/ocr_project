@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Data (ignorar contenido, preservar estructura con .gitkeep)
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Outputs (ignorar contenido, preservar estructura con .gitkeep)
+outputs/**
+!outputs/**/
+!outputs/**/.gitkeep
+
+# Paper
+paper/
+
+# Excel en raíz
+*.xlsx
+
+# Modelo OCR descargado
+DeepSeek-OCR-master/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code
+.claude/
