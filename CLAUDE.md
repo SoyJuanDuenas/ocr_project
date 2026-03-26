@@ -13,7 +13,6 @@ The source documents are volumes ("tomos") of the "Catálogo de los Fondos Ameri
 ```bash
 # Python 3.10+, virtual environment at .venv/
 pip install -r requirements.txt
-# Implicit deps not in requirements.txt: pandas, networkx, requests, torch, openpyxl
 # For OCR inference: needs CUDA GPU (tested on RTX 4070 SUPER, 12GB VRAM)
 # For entity extraction: needs Ollama running locally with qwen2.5:7b
 ```
