@@ -1,0 +1,7 @@
+path: C:/Users/USER/Documents/repositorios/ocr_project/outputs/yolo_obb_dataset
+train: images/train
+val: images/val
+
+names:
+  0: contrato
+  1: continuacion

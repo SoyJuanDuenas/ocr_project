@@ -34,5 +34,16 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Pesos de modelos y caches YOLO
+*.pt
+*.cache
+
+# Artefactos de entrenamiento YOLO
+runs/
+logs/
+
+# Pesos dentro de models/
+models/*/weights/
+
 # Claude Code
 .claude/
