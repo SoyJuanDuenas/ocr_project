@@ -15,14 +15,14 @@ páginas escaneadas del Catálogo de los Fondos Americanos.
 ```
 models/yolo_obb_v1/
 ├── train_obb.py      # Entrenamiento (augmentation por rotación + YOLO)
-├── data.yaml         # Config del dataset YOLO OBB (generado por train_obb.py)
+├── data.yaml         # Config del dataset YOLO OBB (referencia)
 ├── args.yaml         # Hiperparámetros del run de entrenamiento
-├── labels/           # Anotaciones OBB (trackeadas en git, generadas por train_obb.py)
-│   ├── train/        # 2380 labels (340 base × 7 variantes de rotación)
-│   └── val/          # 60 labels (sin augmentation)
 └── weights/
     └── best.pt       # Peso entrenado (~23 MB, NO en git)
 ```
+
+Los labels OBB augmentados se generan en `outputs/yolo_obb_dataset/` al ejecutar
+`train_obb.py` — son un artefacto intermedio regenerable desde `data/segmentation/labels/`.
 
 ## Datos de entrenamiento
 

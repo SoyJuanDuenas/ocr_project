@@ -123,7 +123,7 @@ data/preprocess_v2/*_prep.png
 
 ### Models
 
-- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Datos de entrenamiento en `data/segmentation/` (ground truth anotado en Label Studio). Labels OBB augmentados en `models/yolo_obb_v1/labels/` (trackeados). Pesos (`weights/best.pt`, 23 MB) no trackeados.
+- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Contiene script de entrenamiento, configs (data.yaml, args.yaml) y pesos (`weights/best.pt`, 23 MB, no trackeados). Datos de entrenamiento (ground truth) en `data/segmentation/labels/`.
 
 ### Scripts auxiliares (scripts/)
 
