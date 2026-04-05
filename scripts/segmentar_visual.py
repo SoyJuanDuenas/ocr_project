@@ -5,8 +5,8 @@ Usa perfil de proyección horizontal sobre imágenes binarizadas para detectar
 los gaps verticales entre contratos. Cada gap indica un límite de contrato.
 
 Uso:
-    py src/segmentar_visual.py --image data/preprocess_v2/Tomo_I_p0008_prep.png
-    py src/segmentar_visual.py --images-dir data/preprocess_v2 --glob "Tomo I*_prep.png" --out outputs/segmentacion
+    py scripts/segmentar_visual.py --image data/segmentation/images/train/Tomo_I_p0008_seg.png
+    py scripts/segmentar_visual.py --images-dir data/segmentation/images/train --glob "*_seg.png" --out data/segmentation/prelabels
 """
 
 from __future__ import annotations

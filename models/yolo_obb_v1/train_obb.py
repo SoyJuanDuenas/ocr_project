@@ -2,9 +2,9 @@
 Pipeline completo: augmentación con rotaciones + entrenamiento YOLOv8s-OBB.
 
 Uso:
-    python train_obb.py --source-dataset outputs/yolo_dataset
-    python train_obb.py --source-dataset outputs/yolo_dataset --angles 3 5 8 --skip-augment
-    python train_obb.py --source-dataset outputs/yolo_dataset --epochs 100 --batch 4 --workers 2
+    python models/yolo_obb_v1/train_obb.py --source-dataset data/segmentation
+    python models/yolo_obb_v1/train_obb.py --source-dataset data/segmentation --angles 3 5 8 --skip-augment
+    python models/yolo_obb_v1/train_obb.py --source-dataset data/segmentation --epochs 100 --batch 4 --workers 2
 
 Log en: logs/train_obb.log
 """

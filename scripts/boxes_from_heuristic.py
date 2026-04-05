@@ -5,8 +5,7 @@ Genera bounding boxes 2D de contratos usando heurística de proyección.
 - X: perfil de proyección vertical dentro de cada segmento (dónde empieza/termina la tinta)
 
 Uso:
-  py src/boxes_from_heuristic.py --images-dir outputs/seg_feature_tomo_I/preprocessed ^
-      --glob "Tomo I_*_seg.png" --out outputs/boxes_heuristic
+  py scripts/boxes_from_heuristic.py --images-dir data/segmentation/images/train --out data/segmentation/prelabels
 """
 
 from __future__ import annotations
