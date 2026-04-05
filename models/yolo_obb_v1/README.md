@@ -29,28 +29,52 @@ yolo_obb_v1/
 ### Requisitos
 - `ultralytics`, `torch`, `psutil`
 - GPU con CUDA (entrenado en RTX 4070 SUPER, 12GB VRAM)
-- Dataset de imágenes en `outputs/yolo_obb_dataset/images/`
+- Dataset de imágenes con labels estándar en `outputs/yolo_dataset/` (exportado desde Label Studio via `scripts/labelstudio_sync.py`)
 
-### Generar dataset + entrenar
+### Generar dataset OBB + entrenar
 ```bash
 # Desde la raíz del proyecto:
 python models/yolo_obb_v1/train_obb.py \
-    --source-dataset outputs/yolo_obb_dataset \
+    --source-dataset outputs/yolo_dataset \
     --angles 3 5 8
 ```
 
-El script:
-1. Convierte labels estándar a formato OBB (8 puntos)
-2. Genera rotaciones ±3°, ±5°, ±8° con labels transformados (on-disk augmentation)
-3. Entrena YOLOv8s-OBB (75 epochs, batch=4, imgsz=640, patience=15)
-4. Ultralytics aplica augmentations adicionales on-the-fly: mosaic, hsv, translate, scale, fliplr, randaugment, erasing
+El script ejecuta dos pasos:
+
+1. **Augmentation** (genera `outputs/yolo_obb_dataset/`):
+   - Convierte labels estándar (cx, cy, w, h) a formato OBB (8 puntos)
+   - Genera rotaciones ±3°, ±5°, ±8° con labels transformados
+   - Train: 340 base × 7 variantes = 2380 imágenes; Val: 60 sin augmentation
+
+2. **Entrenamiento** (genera `runs/obb/.../weights/best.pt`):
+   - YOLOv8s-OBB, 75 epochs, batch=4, imgsz=640, patience=15
+   - Augmentations on-the-fly de Ultralytics: mosaic, hsv, translate, scale, fliplr, randaugment, erasing
+   - Al terminar, copia `best.pt` automáticamente a `models/yolo_obb_v1/weights/`
+
+Flags útiles:
+```bash
+# Solo augmentación (sin entrenar)
+python models/yolo_obb_v1/train_obb.py --source-dataset outputs/yolo_dataset --skip-train
+
+# Solo entrenar (reusar dataset OBB existente)
+python models/yolo_obb_v1/train_obb.py --skip-augment
+
+# Cambiar hiperparámetros
+python models/yolo_obb_v1/train_obb.py --source-dataset outputs/yolo_dataset --epochs 100 --batch 8
+```
 
 ### Inferencia
 ```bash
-python src/inferir_yolo_obb.py --model models/yolo_obb_v1/weights/best.pt --n 100
+# 100 páginas aleatorias con visualización de boxes
+python src/inferir_yolo_obb.py --n 100 --out outputs/inferencia_obb
+
+# Página específica
+python src/inferir_yolo_obb.py --images-dir data/preprocess_v2 --n 1 --out outputs/inferencia_obb
 ```
+
+El modelo se carga desde `models/yolo_obb_v1/weights/best.pt` por defecto.
 
 ## Métricas
 Ver `args.yaml` para la configuración completa del entrenamiento.
-Los resultados detallados (curvas PR, matrices de confusión) están en
-`runs/obb/runs/obb/v1_obb_augmented/` (no trackeado en git).
+Los resultados detallados (curvas PR, matrices de confusión) se generan en
+`runs/obb/` durante el entrenamiento (no trackeado en git).
