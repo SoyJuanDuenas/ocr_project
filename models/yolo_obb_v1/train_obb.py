@@ -281,6 +281,14 @@ def train(dataset_dir: Path, epochs: int, batch: int, workers: int,
             log(f"  {k}: {v}")
         log("=" * 60)
 
+        # Copiar best.pt a models/yolo_obb_v1/weights/ para uso en inferencia
+        best_src = Path(project) / name / "weights" / "best.pt"
+        best_dst = Path("models/yolo_obb_v1/weights/best.pt")
+        if best_src.exists():
+            best_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(best_src, best_dst)
+            log(f"best.pt copiado a {best_dst}")
+
     finally:
         stop_event.set()
         monitor_thread.join(timeout=5)
