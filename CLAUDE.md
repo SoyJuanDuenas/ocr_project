@@ -90,7 +90,7 @@ data/
 
 models/yolo_obb_v1/         (modelo YOLO OBB entrenado)
 ├── labels/                 (labels OBB augmentados, SÍ en git)
-└── weights/best.pt         (peso entrenado, NO en git)
+└── weights/best.pt         (peso entrenado, SÍ en git)
 
 data/preprocess_v2/*_prep.png
   → src/inferir_yolo_obb.py → outputs/segmentacion_obb/
@@ -126,7 +126,7 @@ data/preprocess_v2/*_prep.png
 
 ### Models
 
-- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Contiene script de entrenamiento, configs (data.yaml, args.yaml) y pesos (`weights/best.pt`, 23 MB, no trackeados). Datos de entrenamiento (ground truth) en `data/segmentation/labels/`.
+- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Contiene script de entrenamiento, configs (data.yaml, args.yaml) y pesos (`weights/best.pt`, 23 MB, trackeado en git). Datos de entrenamiento (ground truth) en `data/segmentation/labels/`.
 
 ### Scripts auxiliares (scripts/)
 

@@ -38,7 +38,8 @@ py src/preprocess.py --in data/raw --out data/preprocessed --target-dpi 300 \
    --close 3 --denoise-ksize 3 --zoom 1.15
 
 # 1b. Segmentación visual con YOLO OBB
-py src/inferir_yolo_obb.py --model models/yolo_obb_v1/weights/best.pt \
+py src/inferir_yolo_obb.py --visualizar \
+   --model models/yolo_obb_v1/weights/best.pt \
    --n 100 --out outputs/inferencia_obb
 
 # 2. OCR por lotes

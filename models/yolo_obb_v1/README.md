@@ -18,7 +18,7 @@ models/yolo_obb_v1/
 ├── data.yaml         # Config del dataset YOLO OBB (referencia)
 ├── args.yaml         # Hiperparámetros del run de entrenamiento
 └── weights/
-    └── best.pt       # Peso entrenado (~23 MB, NO en git)
+    └── best.pt       # Peso entrenado (~23 MB, SÍ en git)
 ```
 
 Los labels OBB augmentados se generan en `outputs/yolo_obb_dataset/` al ejecutar
