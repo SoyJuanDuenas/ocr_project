@@ -24,8 +24,9 @@ pip install -r requirements.txt
 # 1. Preprocess images (con perfiles por tomo hardcodeados)
 py src/preprocess.py --in data/raw --out data/preprocessed --target-dpi 300 --save-debug --bg-ksize 31 --bin sauvola --sauvola-w 31 --sauvola-k 0.45 --close 3 --denoise-ksize 3 --zoom 1.15
 
-# 1b. Visual segmentation with YOLO OBB (detect contract boundaries before OCR)
-py src/inferir_yolo_obb.py --model models/yolo_obb_v1/weights/best.pt --n 100 --out outputs/inferencia_obb
+# 1b. Visual segmentation with YOLO OBB → recortes por contrato para OCR
+py src/inferir_yolo_obb.py --images-dir data/preprocess_v2 --out outputs/segmentacion_obb
+py src/inferir_yolo_obb.py --visualizar --n 100 --out outputs/inferencia_obb  # debug: boxes dibujadas
 
 # 2. Run OCR batch
 py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo I*_prep.png" --out outputs
@@ -51,7 +52,7 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 
 1. **`src/preprocess.py`** — Image preprocessing. Raw scans/PDFs → binarized PNGs (`*_prep.png`). Steps: grayscale → DPI normalization → zoom → background normalization → Sauvola binarization → morphological stroke repair → median denoising. CLI via argparse. Incorpora perfiles por tomo hardcodeados para los casos ya validados (`Tomo IX`, `VI`, `VIII`, `X`, `XI`, `XIV`).
 
-1b. **`src/inferir_yolo_obb.py`** — Segmentación visual pre-OCR con modelo YOLOv8s-OBB. Detecta contratos y continuaciones en páginas preprocesadas usando oriented bounding boxes. Clases: `contrato` (inicio de contrato nuevo), `continuacion` (continuación de página previa). Modelo en `models/yolo_obb_v1/weights/best.pt`.
+1b. **`src/inferir_yolo_obb.py`** — Segmentación visual pre-OCR con modelo YOLOv8s-OBB. Dos modos: (1) **batch** (default): infiere sobre todas las páginas, exporta recortes individuales por contrato en `crops/` y un `manifest.csv` con coordenadas OBB, clase y confianza; (2) **visualización** (`--visualizar`): muestra aleatoria con boxes dibujadas. Clases: `contrato`, `continuacion`. Modelo en `models/yolo_obb_v1/weights/best.pt`. Función pública `segmentar_batch()` retorna path al manifiesto.
 
 2. **`src/ocr_model_deepseek.py`** — Batch OCR using DeepSeek-OCR (HuggingFace Transformers). Produces per-page text in `outputs/pages/<tomo>_p<NNNN>/result.txt`. Auto-detects device, retry logic (3 retries with alternate prompts), resume support. Validates output with quality flags: `vacio`, `solo_tags`, `muy_corto`, `bajo_alfa`, `texto_repetitivo`.
 
@@ -92,7 +93,9 @@ models/yolo_obb_v1/         (modelo YOLO OBB entrenado)
 └── weights/best.pt         (peso entrenado, NO en git)
 
 data/preprocess_v2/*_prep.png
-  → src/inferir_yolo_obb.py → outputs/inferencia_obb/ (boxes detectadas)
+  → src/inferir_yolo_obb.py → outputs/segmentacion_obb/
+        ├── manifest.csv             (página, box_id, clase, confianza, coords OBB)
+        └── crops/*.png              (recortes individuales por contrato)
   → src/ocr_model_deepseek.py → outputs/pages/<Tomo>_p<NNNN>/result.txt
     → src/pipeline.py → outputs/run_YYYYMMDD_HHMMSS/
         ├── calidad_ocr.csv
