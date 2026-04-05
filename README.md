@@ -16,22 +16,30 @@ pip install -r requirements.txt
 
 | Paso | Script | Descripción |
 |------|--------|-------------|
-| 1 | `src/preprocess.py` | Preprocesamiento de imágenes (binarización Sauvola, 300 DPI) |
+| 1 | `src/preprocess.py` | Preprocesamiento OCR con perfiles por tomo |
+| 1b | `src/inferir_yolo_obb.py` | Segmentación visual con YOLO OBB (contratos + continuaciones) |
 | 2 | `src/ocr_model_deepseek.py` | OCR por lotes con DeepSeek-OCR |
 | 3 | `src/pipeline.py` | Orquestador post-OCR: consolidación, segmentación, parseo, corrección de secuencia, diagnóstico y extracción de entidades |
 | 4 | `src/reocr_perdidos.py` | Re-OCR focalizado de páginas con contratos perdidos |
 | 5 | `src/panelizar.py` | Conversión a formato panel largo (una fila por entidad) |
 | 6 | `src/red_personas.py` | Red de co-ocurrencia de personas (GEXF + CSVs) |
 
-Módulo auxiliar: `src/parseo_compilado.py` (parser de campos estructurados, importado por `pipeline.py`).
+Módulos auxiliares:
+- `src/parseo_compilado.py` — parser de campos estructurados, importado por `pipeline.py`
+- `models/yolo_obb_v1/` — modelo YOLO OBB entrenado, labels y script de entrenamiento
+- `scripts/` — herramientas auxiliares (tuning de filtros, heurísticas, Label Studio)
 
 ## Uso rápido
 
 ```bash
-# 1. Preprocesar imágenes
+# 1. Preprocesar imágenes (con perfiles por tomo hardcodeados)
 py src/preprocess.py --in data/raw --out data/preprocessed --target-dpi 300 \
    --bg-ksize 31 --bin sauvola --sauvola-w 31 --sauvola-k 0.45 \
    --close 3 --denoise-ksize 3 --zoom 1.15
+
+# 1b. Segmentación visual con YOLO OBB
+py src/inferir_yolo_obb.py --model models/yolo_obb_v1/weights/best.pt \
+   --n 100 --out outputs/inferencia_obb
 
 # 2. OCR por lotes
 py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo*_prep.png" --out outputs
@@ -77,3 +85,10 @@ outputs/run_YYYYMMDD_HHMMSS/
 - **111** contratos recuperados vía re-OCR focalizado
 - **26,447** personas únicas, **1,876** naos, **4,015** lugares extraídos
 - Red de co-ocurrencia: 26,447 nodos, 123,846 aristas, componente gigante 92.9%
+
+## Herramientas auxiliares (scripts/)
+
+- **`scripts/preprocess_filter_tuning.py`** — Tuning de filtros de preprocesamiento con 3 subcomandos: `analizar`, `tunear`, `aplicar`. Los resultados se hardcodean en `PREPROCESS_PROFILE_OVERRIDES` de `src/preprocess.py`.
+- **`scripts/segmentar_visual.py`** — Heurística de segmentación por proyección horizontal (reemplazada por YOLO OBB).
+- **`scripts/boxes_from_heuristic.py`** — Generador de pre-labels con heurística 2D.
+- **`scripts/labelstudio_sync.py`** — Integración con Label Studio para revisión de anotaciones.

@@ -19,10 +19,12 @@ También se puede usar por CLI (opcional):
 """
 from __future__ import annotations
 
-import cv2 as cv
-import numpy as np
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+import cv2 as cv
+import numpy as np
 
 try:
     from PIL import Image
@@ -37,6 +39,59 @@ except Exception:
 # -------------------- Extensiones permitidas --------------------
 VALID_IMG_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 VALID_PDF_EXT = {".pdf"}
+
+TOMO_PAGE_RE = re.compile(r"^(?P<tomo>.+?)_p\d{4}$")
+
+PREPROCESS_PROFILE_OVERRIDES = {
+    "Tomo IX": {
+        "bg_ksize": 15,
+        "sauvola_w": 51,
+        "sauvola_k": 0.18,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+    "Tomo VI": {
+        "bg_ksize": 11,
+        "sauvola_w": 51,
+        "sauvola_k": 0.18,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+    "Tomo VIII": {
+        "bg_ksize": 11,
+        "sauvola_w": 51,
+        "sauvola_k": 0.18,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+    "Tomo X": {
+        "bg_ksize": 11,
+        "sauvola_w": 51,
+        "sauvola_k": 0.18,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+    "Tomo XI": {
+        "bg_ksize": 11,
+        "sauvola_w": 51,
+        "sauvola_k": 0.18,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+    "Tomo XIV": {
+        "bg_ksize": 11,
+        "sauvola_w": 31,
+        "sauvola_k": 0.24,
+        "close_ksize": 1,
+        "open_ksize": 0,
+        "denoise_ksize": 1,
+    },
+}
 
 # -------------------- Lectura --------------------
 def _read_image_bgr(path: Path):
@@ -142,6 +197,24 @@ def _trim_and_border(img_bin, pad=8):
 def _maybe_write(path: Path, image):
     path.parent.mkdir(parents=True, exist_ok=True)
     cv.imencode(".png", image)[1].tofile(str(path))
+
+
+def _resolve_tomo_name(path: Path) -> str:
+    stem = path.stem
+    match = TOMO_PAGE_RE.match(stem)
+    if match:
+        return match.group("tomo")
+    return stem
+
+
+def _resolve_profile(tomo_name: str, base: dict) -> tuple[str, dict]:
+    params = dict(base)
+    overrides = PREPROCESS_PROFILE_OVERRIDES.get(tomo_name, {})
+    params.update(overrides)
+    profile_name = "baseline"
+    if overrides:
+        profile_name = f"tomo:{tomo_name}"
+    return profile_name, params
 
 # -------------------- Núcleo (array) --------------------
 def _process_array(
@@ -346,43 +419,67 @@ def preprocess(
 
     processed: List[str] = []
     errors: List[str] = []
+    base_params = {
+        "target_dpi": target_dpi,
+        "zoom": zoom,
+        "bin_method": bin_method,
+        "block_size": block_size,
+        "C": C,
+        "sauvola_w": sauvola_w,
+        "sauvola_k": sauvola_k,
+        "bg_ksize": bg_ksize,
+        "close_ksize": close_ksize,
+        "open_ksize": open_ksize,
+        "denoise_ksize": denoise_ksize,
+        "save_debug": save_debug,
+    }
+    used_profiles: set[tuple[str, str]] = set()
 
     for p in files:
         try:
+            tomo_name = _resolve_tomo_name(p)
+            profile_name, params = _resolve_profile(tomo_name, base_params)
+            profile_key = (tomo_name, profile_name)
+            if profile_key not in used_profiles:
+                if profile_name == "baseline":
+                    print(f"perfil aplicado a {tomo_name}: baseline")
+                else:
+                    print(f"perfil aplicado a {tomo_name}: {PREPROCESS_PROFILE_OVERRIDES[tomo_name]}")
+                used_profiles.add(profile_key)
             if p.suffix.lower() in VALID_IMG_EXT:
 
                 print(f"procesando {p}")
 
                 ok, msg = _process_one_image(
                     p, out_dir,
-                    target_dpi=target_dpi,
-                    zoom=zoom,
-                    bin_method=bin_method,
-                    block_size=block_size,
-                    C=C,
-                    sauvola_w=sauvola_w,
-                    sauvola_k=sauvola_k,
-                    bg_ksize=bg_ksize,
-                    close_ksize=close_ksize,
-                    open_ksize=open_ksize,
-                    denoise_ksize=denoise_ksize,
-                    save_debug=save_debug,
+                    target_dpi=params["target_dpi"],
+                    zoom=params["zoom"],
+                    bin_method=params["bin_method"],
+                    block_size=params["block_size"],
+                    C=params["C"],
+                    sauvola_w=params["sauvola_w"],
+                    sauvola_k=params["sauvola_k"],
+                    bg_ksize=params["bg_ksize"],
+                    close_ksize=params["close_ksize"],
+                    open_ksize=params["open_ksize"],
+                    denoise_ksize=params["denoise_ksize"],
+                    save_debug=params["save_debug"],
                 )
             else:
                 ok, msg = _process_pdf(
                     p, out_dir,
-                    target_dpi=target_dpi,
-                    zoom=zoom,
-                    bin_method=bin_method,
-                    block_size=block_size,
-                    C=C,
-                    sauvola_w=sauvola_w,
-                    sauvola_k=sauvola_k,
-                    bg_ksize=bg_ksize,
-                    close_ksize=close_ksize,
-                    open_ksize=open_ksize,
-                    denoise_ksize=denoise_ksize,
-                    save_debug=save_debug,
+                    target_dpi=params["target_dpi"],
+                    zoom=params["zoom"],
+                    bin_method=params["bin_method"],
+                    block_size=params["block_size"],
+                    C=params["C"],
+                    sauvola_w=params["sauvola_w"],
+                    sauvola_k=params["sauvola_k"],
+                    bg_ksize=params["bg_ksize"],
+                    close_ksize=params["close_ksize"],
+                    open_ksize=params["open_ksize"],
+                    denoise_ksize=params["denoise_ksize"],
+                    save_debug=params["save_debug"],
                 )
 
             if ok:
@@ -396,4 +493,61 @@ def preprocess(
             errors.append(f"{p}: {e}")
 
     return {"processed": processed, "errors": errors}
+
+
+# -------------------- CLI --------------------
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Preprocesa imágenes/PDFs para OCR"
+    )
+    parser.add_argument("--in", dest="inp", required=True,
+                        help="Directorio de entrada con imágenes/PDFs")
+    parser.add_argument("--out", required=True,
+                        help="Directorio de salida")
+    parser.add_argument("--target-dpi", type=int, default=300)
+    parser.add_argument("--zoom", type=float, default=1.15)
+    parser.add_argument("--bg-ksize", type=int, default=31,
+                        help="Kernel para normalización de fondo (0=desactivar)")
+    parser.add_argument("--bin", dest="bin_method", default="sauvola",
+                        choices=["otsu", "adaptive", "sauvola", "auto"])
+    parser.add_argument("--block-size", type=int, default=35)
+    parser.add_argument("--C", type=int, default=11)
+    parser.add_argument("--sauvola-w", type=int, default=31)
+    parser.add_argument("--sauvola-k", type=float, default=0.34)
+    parser.add_argument("--close", dest="close_ksize", type=int, default=2)
+    parser.add_argument("--open", dest="open_ksize", type=int, default=3)
+    parser.add_argument("--denoise-ksize", type=int, default=3)
+    parser.add_argument("--save-debug", action="store_true")
+    parser.add_argument("--no-recursive", action="store_true",
+                        help="No buscar recursivamente en subdirectorios")
+
+    args = parser.parse_args()
+
+    result = preprocess(
+        inp=args.inp,
+        out=args.out,
+        target_dpi=args.target_dpi,
+        zoom=args.zoom,
+        bg_ksize=args.bg_ksize,
+        bin_method=args.bin_method,
+        block_size=args.block_size,
+        C=args.C,
+        sauvola_w=args.sauvola_w,
+        sauvola_k=args.sauvola_k,
+        close_ksize=args.close_ksize,
+        open_ksize=args.open_ksize,
+        denoise_ksize=args.denoise_ksize,
+        save_debug=args.save_debug,
+        recursive=not args.no_recursive,
+    )
+
+    print(f"\nResultado: {len(result['processed'])} procesados, {len(result['errors'])} errores")
+    for e in result["errors"]:
+        print(f"  ERROR: {e}")
+
+
+if __name__ == "__main__":
+    main()
 

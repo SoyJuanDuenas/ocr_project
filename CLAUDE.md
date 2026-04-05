@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Pipeline for digitizing scanned historical documents (notarial records from 15th-16th century Spain). The workflow is: **scan images/PDFs → preprocessing → OCR → text cleaning → structured extraction → entity extraction via LLM → network analysis**.
+Pipeline for digitizing scanned historical documents (notarial records from 15th-16th century Spain). The workflow is: **scan images/PDFs → preprocessing → visual segmentation (YOLO OBB) → OCR → text cleaning → structured extraction → entity extraction via LLM → network analysis**.
 
 The source documents are volumes ("tomos") of the "Catálogo de los Fondos Americanos" archive (16 volumes, ~26,000 contracts, 15th-16th century).
 
@@ -21,8 +21,11 @@ pip install -r requirements.txt
 ## Key Commands
 
 ```bash
-# 1. Preprocess images
+# 1. Preprocess images (con perfiles por tomo hardcodeados)
 py src/preprocess.py --in data/raw --out data/preprocessed --target-dpi 300 --save-debug --bg-ksize 31 --bin sauvola --sauvola-w 31 --sauvola-k 0.45 --close 3 --denoise-ksize 3 --zoom 1.15
+
+# 1b. Visual segmentation with YOLO OBB (detect contract boundaries before OCR)
+py src/inferir_yolo_obb.py --model models/yolo_obb_v1/weights/best.pt --n 100 --out outputs/inferencia_obb
 
 # 2. Run OCR batch
 py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo I*_prep.png" --out outputs
@@ -46,7 +49,9 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 
 ### Pipeline Stages (in order)
 
-1. **`src/preprocess.py`** — Image preprocessing. Raw scans/PDFs → binarized PNGs (`*_prep.png`). Steps: grayscale → DPI normalization → zoom → background normalization → Sauvola binarization → morphological stroke repair → median denoising. CLI via argparse.
+1. **`src/preprocess.py`** — Image preprocessing. Raw scans/PDFs → binarized PNGs (`*_prep.png`). Steps: grayscale → DPI normalization → zoom → background normalization → Sauvola binarization → morphological stroke repair → median denoising. CLI via argparse. Incorpora perfiles por tomo hardcodeados para los casos ya validados (`Tomo IX`, `VI`, `VIII`, `X`, `XI`, `XIV`).
+
+1b. **`src/inferir_yolo_obb.py`** — Segmentación visual pre-OCR con modelo YOLOv8s-OBB. Detecta contratos y continuaciones en páginas preprocesadas usando oriented bounding boxes. Clases: `contrato` (inicio de contrato nuevo), `continuacion` (continuación de página previa). Modelo en `models/yolo_obb_v1/weights/best.pt`.
 
 2. **`src/ocr_model_deepseek.py`** — Batch OCR using DeepSeek-OCR (HuggingFace Transformers). Produces per-page text in `outputs/pages/<tomo>_p<NNNN>/result.txt`. Auto-detects device, retry logic (3 retries with alternate prompts), resume support. Validates output with quality flags: `vacio`, `solo_tags`, `muy_corto`, `bajo_alfa`, `texto_repetitivo`.
 
@@ -75,6 +80,7 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ```
 data/raw/ (scans, PDFs)
   → data/preprocess_v2/ (*_prep.png)
+    → outputs/inferencia_obb/ (*_obb.png, segmentación visual con YOLO OBB)
     → outputs/pages/<Tomo>_p<NNNN>/result.txt
       → outputs/run_YYYYMMDD_HHMMSS/
           ├── pages_merged/          (si --reocr-dir)
@@ -98,12 +104,24 @@ data/raw/ (scans, PDFs)
 - **OCR flags**: space-separated strings (e.g., `"bajo_alfa; script_no_latino"`)
 - **Tomo ID normalization**: spaces → underscores in DataFrames (e.g., `Tomo I` → `Tomo_I`)
 - **Checkpointing**: OCR skips pages with existing `result.txt` when `--resume`; entity extraction saves `compilado_parcial.xlsx` every 500 contracts
+- **Preprocess profiles**: `src/preprocess.py` aplica overrides por tomo para los tomos ya tuneados
 
 ### Naming Conventions
 
 - Preprocessed images: `<Tomo Name>_p<NNNN>_prep.png` (e.g., `Tomo XVI_p0001_prep.png`)
 - Page directories: `outputs/pages/<Tomo Name>_p<NNNN>/` — parsed by regex `^(?P<tomo>.+?)_p(?P<page>\d+)$`
 - Run directories: `outputs/run_YYYYMMDD_HHMMSS/` — timestamped, self-contained
+
+### Models
+
+- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Contiene labels (trackeados en git), configuración de entrenamiento, y script de training con augmentation por rotación. Pesos (`weights/best.pt`, 23 MB) no trackeados en git.
+
+### Scripts auxiliares (scripts/)
+
+- **`scripts/preprocess_filter_tuning.py`** — Tuning de filtros de preprocesamiento. Subcomandos: `analizar` (distribución de píxeles), `tunear` (grid search de parámetros), `aplicar` (regenerar *_prep.png con mejores perfiles). Los resultados se hardcodean en `PREPROCESS_PROFILE_OVERRIDES` de `src/preprocess.py`.
+- **`scripts/segmentar_visual.py`** — Heurística de segmentación por proyección horizontal (reemplazada por YOLO OBB, conservada como referencia).
+- **`scripts/boxes_from_heuristic.py`** — Generador de pre-labels usando heurística de proyección 2D. Depende de `segmentar_visual.py`.
+- **`scripts/labelstudio_sync.py`** — Integración con Label Studio para revisión colaborativa de cajas de segmentación.
 
 ### External Dependencies
 
