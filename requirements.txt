@@ -1,11 +1,23 @@
-transformers==4.46.3
-tokenizers==0.20.3
-PyMuPDF
-img2pdf
+# OCR model
+transformers>=4.46.3
+torch
 einops
 easydict
-addict 
+addict
+
+# Imagen y PDF
+PyMuPDF
 Pillow
+opencv-python
+img2pdf
+
+# Datos y Excel
 numpy
 opencv-python
 ultralytics
+pandas
+openpyxl
+
+# Pipeline y red
+requests
+networkx
