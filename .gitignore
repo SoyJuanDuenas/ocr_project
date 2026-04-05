@@ -45,8 +45,9 @@ Thumbs.db
 runs/
 logs/
 
-# Pesos dentro de models/
+# Pesos dentro de models/ (excepto best.pt que sí se trackea)
 models/*/weights/
+!models/*/weights/best.pt
 
 # Claude Code
 .claude/
