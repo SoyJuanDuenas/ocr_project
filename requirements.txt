@@ -13,6 +13,8 @@ img2pdf
 
 # Datos y Excel
 numpy
+opencv-python
+ultralytics
 pandas
 openpyxl
 

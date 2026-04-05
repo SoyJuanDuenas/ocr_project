@@ -8,6 +8,9 @@ __pycache__/
 data/**
 !data/**/
 !data/**/.gitkeep
+# Trackear ground truth de segmentación (labels + data.yaml)
+!data/segmentation/labels/**
+!data/segmentation/data.yaml
 
 # Outputs (ignorar contenido, preservar estructura con .gitkeep)
 outputs/**
@@ -33,6 +36,18 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Pesos de modelos y caches YOLO
+*.pt
+*.cache
+
+# Artefactos de entrenamiento YOLO
+runs/
+logs/
+
+# Pesos dentro de models/ (excepto best.pt que sí se trackea)
+models/*/weights/
+!models/*/weights/best.pt
 
 # Claude Code
 .claude/
