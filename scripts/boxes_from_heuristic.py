@@ -194,9 +194,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Genera bounding boxes 2D con heurística de proyección"
     )
-    parser.add_argument("--images-dir", required=True)
-    parser.add_argument("--glob", default="Tomo I_*_seg.png")
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--images-dir", default="data/segmentation/images/train")
+    parser.add_argument("--glob", default="*_seg.png")
+    parser.add_argument("--out", default="data/segmentation/prelabels")
     parser.add_argument("--margen-x", type=int, default=15,
                         help="Margen horizontal en px alrededor del texto (default: 15)")
 

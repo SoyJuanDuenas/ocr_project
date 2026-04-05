@@ -78,22 +78,31 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ### Data Flow
 
 ```
-data/raw/ (scans, PDFs)
-  → data/preprocess_v2/ (*_prep.png)
-    → outputs/inferencia_obb/ (*_obb.png, segmentación visual con YOLO OBB)
-    → outputs/pages/<Tomo>_p<NNNN>/result.txt
-      → outputs/run_YYYYMMDD_HHMMSS/
-          ├── pages_merged/          (si --reocr-dir)
-          ├── calidad_ocr.csv
-          ├── tomos_txt/*.txt        (16 tomos consolidados)
-          ├── contratos_segmentados.xlsx
-          ├── compilado.xlsx         (dataset final con entidades)
-          ├── diagnostico_reocr.xlsx
-          ├── panel.xlsx             (formato largo)
-          ├── red_personas.gexf      (red para Gephi)
-          ├── red_personas_nodos.csv
-          ├── red_personas_aristas.csv
-          └── red_personas_stats.txt
+data/
+├── raw/                    (scans, PDFs)
+├── preprocess_v2/          (*_prep.png — imágenes preprocesadas para OCR)
+└── segmentation/           (datos de segmentación visual)
+    ├── images/             (*_seg.png — imágenes para entrenar/anotar, NO en git)
+    ├── prelabels/          (pre-labels heurísticas → input a Label Studio)
+    ├── labels/             (ground truth de Label Studio, SÍ en git)
+    └── data.yaml
+
+models/yolo_obb_v1/         (modelo YOLO OBB entrenado)
+├── labels/                 (labels OBB augmentados, SÍ en git)
+└── weights/best.pt         (peso entrenado, NO en git)
+
+data/preprocess_v2/*_prep.png
+  → src/inferir_yolo_obb.py → outputs/inferencia_obb/ (boxes detectadas)
+  → src/ocr_model_deepseek.py → outputs/pages/<Tomo>_p<NNNN>/result.txt
+    → src/pipeline.py → outputs/run_YYYYMMDD_HHMMSS/
+        ├── calidad_ocr.csv
+        ├── tomos_txt/*.txt          (16 tomos consolidados)
+        ├── contratos_segmentados.xlsx
+        ├── compilado.xlsx           (dataset final con entidades)
+        ├── diagnostico_reocr.xlsx
+        ├── panel.xlsx               (formato largo)
+        ├── red_personas.gexf        (red para Gephi)
+        └── red_personas_*.csv
 ```
 
 ### Key Data Conventions
@@ -114,14 +123,14 @@ data/raw/ (scans, PDFs)
 
 ### Models
 
-- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Contiene labels (trackeados en git), configuración de entrenamiento, y script de training con augmentation por rotación. Pesos (`weights/best.pt`, 23 MB) no trackeados en git.
+- **`models/yolo_obb_v1/`** — YOLOv8s-OBB entrenado para segmentación de contratos. Datos de entrenamiento en `data/segmentation/` (ground truth anotado en Label Studio). Labels OBB augmentados en `models/yolo_obb_v1/labels/` (trackeados). Pesos (`weights/best.pt`, 23 MB) no trackeados.
 
 ### Scripts auxiliares (scripts/)
 
 - **`scripts/preprocess_filter_tuning.py`** — Tuning de filtros de preprocesamiento. Subcomandos: `analizar` (distribución de píxeles), `tunear` (grid search de parámetros), `aplicar` (regenerar *_prep.png con mejores perfiles). Los resultados se hardcodean en `PREPROCESS_PROFILE_OVERRIDES` de `src/preprocess.py`.
 - **`scripts/segmentar_visual.py`** — Heurística de segmentación por proyección horizontal (reemplazada por YOLO OBB, conservada como referencia).
-- **`scripts/boxes_from_heuristic.py`** — Generador de pre-labels usando heurística de proyección 2D. Depende de `segmentar_visual.py`.
-- **`scripts/labelstudio_sync.py`** — Integración con Label Studio para revisión colaborativa de cajas de segmentación.
+- **`scripts/boxes_from_heuristic.py`** — Generador de pre-labels usando heurística de proyección 2D. Output en `data/segmentation/prelabels/`. Depende de `segmentar_visual.py`.
+- **`scripts/labelstudio_sync.py`** — Integración con Label Studio para revisión de anotaciones. Import: sube imágenes + pre-labels. Export: descarga ground truth a `data/segmentation/labels/`.
 
 ### External Dependencies
 

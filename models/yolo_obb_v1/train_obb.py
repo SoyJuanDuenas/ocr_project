@@ -301,7 +301,7 @@ def main():
         description="Augmentacion con rotaciones + entrenamiento YOLOv8s-OBB"
     )
     # Augmentacion
-    parser.add_argument("--source-dataset", type=Path, default=Path("outputs/yolo_dataset"),
+    parser.add_argument("--source-dataset", type=Path, default=Path("data/segmentation"),
                         help="Dataset YOLO regular de entrada (con images/ y labels/)")
     parser.add_argument("--obb-dataset", type=Path, default=Path("outputs/yolo_obb_dataset"),
                         help="Directorio de salida para dataset OBB augmentado")

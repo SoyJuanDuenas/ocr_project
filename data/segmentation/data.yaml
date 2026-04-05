@@ -1,0 +1,7 @@
+path: data/segmentation
+train: images/train
+val: images/val
+
+names:
+  0: contrato
+  1: continuacion

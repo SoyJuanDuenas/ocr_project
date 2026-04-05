@@ -13,24 +13,24 @@ Requisitos:
 
 Uso típico:
   # 1. Levantar servidor de imágenes (dejar corriendo en otra terminal)
-  py src/labelstudio_sync.py serve --images-dir data/preprocess_v2 --port 8089
+  py scripts/labelstudio_sync.py serve --images-dir data/segmentation/images/train --port 8089
 
-  # 2. Importar cajas propuestas a Label Studio
-  py src/labelstudio_sync.py import ^
-      --proposed outputs/segmentacion/contract_boxes_proposed.csv ^
-      --images-dir data/preprocess_v2 ^
+  # 2. Importar pre-labels heurísticas a Label Studio
+  py scripts/labelstudio_sync.py import ^
+      --proposed data/segmentation/prelabels/contract_boxes_heuristic.csv ^
+      --images-dir data/segmentation/images/train ^
       --ls-url http://localhost:8080 ^
-      --ls-token <tu_api_token> ^
+      --ls-email admin@local.dev --ls-password admin123 ^
       --image-server http://localhost:8089
 
-  # 3. Revisar en Label Studio (http://localhost:8080)
+  # 3. Revisar y corregir en Label Studio (http://localhost:8080)
 
-  # 4. Exportar anotaciones revisadas
-  py src/labelstudio_sync.py export ^
+  # 4. Exportar ground truth a labels/
+  py scripts/labelstudio_sync.py export ^
       --project-id <id> ^
-      --output outputs/segmentacion/contract_boxes_reviewed.csv ^
+      --output data/segmentation/labels/ ^
       --ls-url http://localhost:8080 ^
-      --ls-token <tu_api_token>
+      --ls-email admin@local.dev --ls-password admin123
 """
 
 from __future__ import annotations

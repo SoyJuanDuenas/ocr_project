@@ -13,30 +13,69 @@ páginas escaneadas del Catálogo de los Fondos Americanos.
 ## Estructura
 
 ```
-yolo_obb_v1/
-├── train_obb.py      # Script de entrenamiento (incluye augmentation por rotación)
-├── data.yaml         # Config del dataset YOLO
+models/yolo_obb_v1/
+├── train_obb.py      # Entrenamiento (augmentation por rotación + YOLO)
+├── data.yaml         # Config del dataset YOLO OBB (generado por train_obb.py)
 ├── args.yaml         # Hiperparámetros del run de entrenamiento
-├── labels/           # Anotaciones OBB (trackeadas en git)
+├── labels/           # Anotaciones OBB (trackeadas en git, generadas por train_obb.py)
 │   ├── train/        # 2380 labels (340 base × 7 variantes de rotación)
 │   └── val/          # 60 labels (sin augmentation)
 └── weights/
     └── best.pt       # Peso entrenado (~23 MB, NO en git)
 ```
 
-## Reproducir entrenamiento
+## Datos de entrenamiento
+
+Los datos fuente están en `data/segmentation/` (ground truth anotado en Label Studio):
+
+```
+data/segmentation/
+├── images/           # Imágenes *_seg.png para segmentación (NO en git)
+│   ├── train/        # 340 imágenes base
+│   └── val/          # 60 imágenes
+├── prelabels/        # Pre-labels heurísticas (input a Label Studio)
+├── labels/           # Ground truth de Label Studio (SÍ en git)
+│   ├── train/*.txt   # Formato: class cx cy w h
+│   └── val/*.txt
+└── data.yaml
+```
+
+## Flujo completo desde cero
+
+```bash
+# 1. Generar pre-labels heurísticas sobre imágenes de segmentación
+python scripts/boxes_from_heuristic.py \
+    --images-dir data/segmentation/images/train
+
+# 2. Importar a Label Studio para revisión humana
+python scripts/labelstudio_sync.py serve --images-dir data/segmentation/images/train
+python scripts/labelstudio_sync.py import \
+    --proposed data/segmentation/prelabels/contract_boxes_heuristic.csv \
+    --images-dir data/segmentation/images/train
+
+# 3. Revisar y corregir en Label Studio → exportar ground truth
+python scripts/labelstudio_sync.py export \
+    --project-id <id> --output data/segmentation/labels/
+
+# 4. Entrenar YOLO OBB (augmentation + training)
+python models/yolo_obb_v1/train_obb.py \
+    --source-dataset data/segmentation --angles 3 5 8
+
+# 5. Inferencia sobre páginas preprocesadas
+python src/inferir_yolo_obb.py --n 100 --out outputs/inferencia_obb
+```
+
+## Entrenamiento
 
 ### Requisitos
 - `ultralytics`, `torch`, `psutil`
 - GPU con CUDA (entrenado en RTX 4070 SUPER, 12GB VRAM)
-- Dataset de imágenes con labels estándar en `outputs/yolo_dataset/` (exportado desde Label Studio via `scripts/labelstudio_sync.py`)
+- Imágenes en `data/segmentation/images/`
 
 ### Generar dataset OBB + entrenar
 ```bash
-# Desde la raíz del proyecto:
 python models/yolo_obb_v1/train_obb.py \
-    --source-dataset outputs/yolo_dataset \
-    --angles 3 5 8
+    --source-dataset data/segmentation --angles 3 5 8
 ```
 
 El script ejecuta dos pasos:
@@ -54,22 +93,19 @@ El script ejecuta dos pasos:
 Flags útiles:
 ```bash
 # Solo augmentación (sin entrenar)
-python models/yolo_obb_v1/train_obb.py --source-dataset outputs/yolo_dataset --skip-train
+python models/yolo_obb_v1/train_obb.py --source-dataset data/segmentation --skip-train
 
 # Solo entrenar (reusar dataset OBB existente)
 python models/yolo_obb_v1/train_obb.py --skip-augment
 
 # Cambiar hiperparámetros
-python models/yolo_obb_v1/train_obb.py --source-dataset outputs/yolo_dataset --epochs 100 --batch 8
+python models/yolo_obb_v1/train_obb.py --source-dataset data/segmentation --epochs 100 --batch 8
 ```
 
 ### Inferencia
 ```bash
 # 100 páginas aleatorias con visualización de boxes
 python src/inferir_yolo_obb.py --n 100 --out outputs/inferencia_obb
-
-# Página específica
-python src/inferir_yolo_obb.py --images-dir data/preprocess_v2 --n 1 --out outputs/inferencia_obb
 ```
 
 El modelo se carga desde `models/yolo_obb_v1/weights/best.pt` por defecto.
