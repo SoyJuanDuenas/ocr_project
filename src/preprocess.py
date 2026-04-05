@@ -1,21 +1,25 @@
 """
 Preprocesa imágenes (PNG/JPG/TIF/WEBP/BMP) y PDFs (página a página) para OCR.
 
-Expone la función pública:
-    preprocess(inp, out, target_dpi=300, zoom=1.15, bg_ksize=31,
-               bin_method="auto", block_size=35, C=11,
-               sauvola_w=31, sauvola_k=0.34,
-               close_ksize=2, open_ksize=0, denoise_ksize=3,
-               save_debug=False)
+Uso CLI — preprocesar:
+    py src/preprocess.py --in data/raw --out data/preprocess_v2 --save-debug
+    py src/preprocess.py --in data/raw --out data/preprocess_v2 --bin sauvola --sauvola-w 31 --sauvola-k 0.45
 
-Devuelve un dict con listas de 'processed' y 'errors'.
+Uso CLI — tuning de perfiles por tomo:
+    py src/preprocess.py --tune --in data/raw --out data/preprocess_v2
+    py src/preprocess.py --tune --in data/raw --out data/preprocess_v2 --tune-only
+    py src/preprocess.py --tune --in data/raw --out data/preprocess_v2 --reference-tomo "Tomo I" --sample-pages 8 --max-candidates 8
+
+El modo --tune:
+  1. Lee *_prep.png existentes en --out para calcular métricas por tomo
+  2. Compara cada tomo contra el de referencia (Tomo I por defecto)
+  3. Grid search de parámetros en los tomos más distantes
+  4. Actualiza PREPROCESS_PROFILE_OVERRIDES en este mismo archivo
+  5. Ejecuta preprocesamiento con los nuevos perfiles (salvo --tune-only)
 
 Uso desde otro script:
-    from preprocess import preprocess
-    result = preprocess("data/raw", "data/preprocessed", save_debug=True)
-
-También se puede usar por CLI (opcional):
-    python preprocess.py --in data/raw --out data/preprocessed --save-debug
+    from preprocess import preprocess, tune
+    result = preprocess("data/raw", "data/preprocess_v2", save_debug=True)
 """
 from __future__ import annotations
 
@@ -41,7 +45,10 @@ VALID_IMG_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 VALID_PDF_EXT = {".pdf"}
 
 TOMO_PAGE_RE = re.compile(r"^(?P<tomo>.+?)_p\d{4}$")
+PAGE_PREP_RE = re.compile(r"^(?P<tomo>.+?)_p(?P<page>\d+)_prep\.png$")
+PDF_RE = re.compile(r"^(?P<tomo>.+)\.pdf$", re.IGNORECASE)
 
+# --- Inicio PREPROCESS_PROFILE_OVERRIDES ---
 PREPROCESS_PROFILE_OVERRIDES = {
     "Tomo IX": {
         "bg_ksize": 15,
@@ -92,6 +99,7 @@ PREPROCESS_PROFILE_OVERRIDES = {
         "denoise_ksize": 1,
     },
 }
+# --- Fin PREPROCESS_PROFILE_OVERRIDES ---
 
 # -------------------- Lectura --------------------
 def _read_image_bgr(path: Path):
@@ -215,6 +223,296 @@ def _resolve_profile(tomo_name: str, base: dict) -> tuple[str, dict]:
     if overrides:
         profile_name = f"tomo:{tomo_name}"
     return profile_name, params
+
+# -------------------- Tuning --------------------
+TUNE_METRIC_KEYS = ["ink_lt_128", "white_ge_240", "mean", "std", "p10", "p50", "p90"]
+
+TUNE_PARAM_GRID = [
+    {"name": "baseline"},
+    {"name": "soft_bg15_k030", "bg_ksize": 15, "sauvola_w": 31, "sauvola_k": 0.30, "close_ksize": 2, "open_ksize": 1, "denoise_ksize": 1},
+    {"name": "soft_bg15_k024", "bg_ksize": 15, "sauvola_w": 41, "sauvola_k": 0.24, "close_ksize": 1, "open_ksize": 1, "denoise_ksize": 1},
+    {"name": "soft_bg11_k018", "bg_ksize": 11, "sauvola_w": 51, "sauvola_k": 0.18, "close_ksize": 1, "open_ksize": 0, "denoise_ksize": 1},
+    {"name": "soft_bg21_k026", "bg_ksize": 21, "sauvola_w": 41, "sauvola_k": 0.26, "close_ksize": 1, "open_ksize": 1, "denoise_ksize": 1},
+    {"name": "mid_bg21_k030", "bg_ksize": 21, "sauvola_w": 31, "sauvola_k": 0.30, "close_ksize": 2, "open_ksize": 1, "denoise_ksize": 1},
+    {"name": "mid_bg31_k034", "bg_ksize": 31, "sauvola_w": 41, "sauvola_k": 0.34, "close_ksize": 2, "open_ksize": 1, "denoise_ksize": 3},
+    {"name": "sharp_bg11_k024", "bg_ksize": 11, "sauvola_w": 31, "sauvola_k": 0.24, "close_ksize": 1, "open_ksize": 0, "denoise_ksize": 1},
+    {"name": "sharp_bg15_k018", "bg_ksize": 15, "sauvola_w": 51, "sauvola_k": 0.18, "close_ksize": 1, "open_ksize": 0, "denoise_ksize": 1},
+]
+
+# Parámetros base para el grid (los que no se varían)
+_TUNE_BASE = {
+    "target_dpi": 300, "zoom": 1.15, "bin_method": "sauvola",
+    "block_size": 35, "C": 11, "sauvola_w": 31, "sauvola_k": 0.45,
+    "bg_ksize": 31, "close_ksize": 3, "open_ksize": 3, "denoise_ksize": 3,
+}
+
+
+def _tune_image_metrics(img: np.ndarray) -> dict:
+    pixels = img.reshape(-1).astype(np.uint8)
+    return {
+        "ink_lt_128": float(np.mean(pixels < 128)),
+        "white_ge_240": float(np.mean(pixels >= 240)),
+        "mean": float(np.mean(pixels)),
+        "std": float(np.std(pixels)),
+        "p10": float(np.percentile(pixels, 10)),
+        "p50": float(np.percentile(pixels, 50)),
+        "p90": float(np.percentile(pixels, 90)),
+    }
+
+
+def _tune_summary(rows: list) -> dict:
+    out = {}
+    for key in TUNE_METRIC_KEYS:
+        values = np.array([float(r[key]) for r in rows], dtype=np.float64)
+        out[f"{key}_median"] = float(np.median(values))
+        out[f"{key}_mean"] = float(np.mean(values))
+        out[f"{key}_std"] = float(np.std(values))
+    return out
+
+
+def _tune_distance(stats: dict, target: dict) -> float:
+    total = 0.0
+    for key in TUNE_METRIC_KEYS:
+        center = target[f"{key}_median"]
+        spread = max(target[f"{key}_std"], 1e-6)
+        total += abs(stats[f"{key}_median"] - center) / spread
+    return float(total / len(TUNE_METRIC_KEYS))
+
+
+def _tune_collect_prep(prep_dir: Path) -> dict:
+    """Colecta métricas de páginas *_prep.png agrupadas por tomo."""
+    grouped: dict[str, list] = {}
+    for path in sorted(prep_dir.glob("*_prep.png")):
+        match = PAGE_PREP_RE.match(path.name)
+        if not match:
+            continue
+        data = np.fromfile(str(path), dtype=np.uint8)
+        img = cv.imdecode(data, cv.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        row = {
+            "tomo": match.group("tomo"),
+            "page_num": int(match.group("page")),
+        }
+        row.update(_tune_image_metrics(img))
+        grouped.setdefault(row["tomo"], []).append(row)
+    for tomo in grouped:
+        grouped[tomo].sort(key=lambda r: r["page_num"])
+    return grouped
+
+
+def _tune_pick_pages(rows: list, n: int) -> list:
+    rows_sorted = sorted(rows, key=lambda r: r["ink_lt_128"])
+    if len(rows_sorted) <= n:
+        return [r["page_num"] for r in rows_sorted]
+    idxs = np.linspace(0, len(rows_sorted) - 1, num=n)
+    pages, seen = [], set()
+    for idx in idxs:
+        page = rows_sorted[int(round(float(idx)))]["page_num"]
+        if page not in seen:
+            pages.append(page)
+            seen.add(page)
+    return pages
+
+
+def _tune_render_page(pdf_path: Path, page_num: int, target_dpi: int = 300) -> np.ndarray:
+    doc = fitz.open(str(pdf_path))
+    try:
+        page = doc.load_page(page_num - 1)
+        zoom_pdf = target_dpi / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom_pdf, zoom_pdf), alpha=False)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            img = cv.cvtColor(img, cv.COLOR_RGBA2RGB)
+        return cv.cvtColor(img, cv.COLOR_RGB2BGR)
+    finally:
+        doc.close()
+
+
+def _tune_process_array(bgr: np.ndarray, params: dict) -> np.ndarray:
+    """Procesa una imagen con parámetros dados, devuelve imagen binarizada."""
+    gray = _to_gray(bgr)
+    gray = _zoom(gray, factor=params.get("zoom", 1.15))
+    bg_k = params.get("bg_ksize", 31)
+    gray = _normalize_background(gray, bg_ksize=bg_k) if bg_k > 0 else gray
+    img_bin = _binarize(
+        gray,
+        method=params.get("bin_method", "sauvola"),
+        block_size=params.get("block_size", 35),
+        C=params.get("C", 11),
+        sauvola_w=params.get("sauvola_w", 31),
+        sauvola_k=params.get("sauvola_k", 0.34),
+    )
+    img_bin = _fix_strokes(img_bin, close_ksize=params.get("close_ksize", 2),
+                           open_ksize=params.get("open_ksize", 0))
+    img_bin = _denoise_after_bin(img_bin, ksize=params.get("denoise_ksize", 3))
+    return img_bin
+
+
+def _tune_update_script(new_overrides: dict) -> None:
+    """Reescribe PREPROCESS_PROFILE_OVERRIDES en este mismo archivo."""
+    script_path = Path(__file__).resolve()
+    content = script_path.read_text(encoding="utf-8")
+
+    marker_start = "# --- Inicio PREPROCESS_PROFILE_OVERRIDES ---"
+    marker_end = "# --- Fin PREPROCESS_PROFILE_OVERRIDES ---"
+
+    idx_start = content.index(marker_start)
+    idx_end = content.index(marker_end) + len(marker_end)
+
+    # Generar nuevo bloque
+    lines = [marker_start, "PREPROCESS_PROFILE_OVERRIDES = {"]
+    for tomo, params in sorted(new_overrides.items()):
+        lines.append(f'    "{tomo}": {{')
+        for k, v in params.items():
+            if isinstance(v, float):
+                lines.append(f'        "{k}": {v},')
+            else:
+                lines.append(f'        "{k}": {v},')
+        lines.append("    },")
+    lines.append("}")
+    lines.append(marker_end)
+
+    new_block = "\n".join(lines)
+    content = content[:idx_start] + new_block + content[idx_end:]
+    script_path.write_text(content, encoding="utf-8")
+
+
+def tune(
+    raw_dir: Path,
+    prep_dir: Path,
+    out_dir: Path,
+    *,
+    reference_tomo: str = "Tomo I",
+    sample_pages: int = 6,
+    max_candidates: int = 6,
+) -> dict:
+    """
+    Grid search de parámetros por tomo, actualiza PREPROCESS_PROFILE_OVERRIDES.
+
+    Retorna dict con los perfiles encontrados {tomo: {param: value, ...}}.
+    """
+    if fitz is None:
+        raise SystemExit("PyMuPDF es requerido para tune: pip install PyMuPDF")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Colectar métricas del preprocesado actual
+    print(f"Recolectando métricas de {prep_dir}...")
+    grouped = _tune_collect_prep(prep_dir)
+    if reference_tomo not in grouped:
+        raise SystemExit(f"Tomo de referencia '{reference_tomo}' no encontrado en {prep_dir}")
+
+    target_stats = _tune_summary(grouped[reference_tomo])
+    print(f"Referencia: {reference_tomo} ({len(grouped[reference_tomo])} páginas)")
+
+    # 2. Calcular distancia baseline de cada tomo
+    baseline_distances = []
+    for tomo, rows in grouped.items():
+        stats = _tune_summary(rows)
+        baseline_distances.append({
+            "tomo": tomo,
+            "n_paginas": len(rows),
+            "distance": _tune_distance(stats, target_stats),
+        })
+    baseline_distances.sort(key=lambda r: r["distance"], reverse=True)
+
+    print("\nDistancias al perfil de referencia (baseline):")
+    for row in baseline_distances:
+        print(f"  {row['tomo']}\tdist={row['distance']:.3f}\tpages={row['n_paginas']}")
+
+    # 3. Seleccionar candidatos y mapear PDFs
+    candidates = [r for r in baseline_distances if r["tomo"] != reference_tomo][:max_candidates]
+    pdf_map = {}
+    for path in raw_dir.glob("*.pdf"):
+        match = PDF_RE.match(path.name)
+        if match:
+            key = re.sub(r"\s+", " ", match.group("tomo").strip()).casefold()
+            pdf_map[key] = path
+
+    # 4. Grid search por tomo candidato
+    new_overrides = dict(PREPROCESS_PROFILE_OVERRIDES)
+    results_rows = []
+
+    for candidate in candidates:
+        tomo = candidate["tomo"]
+        tomo_key = re.sub(r"\s+", " ", tomo.strip()).casefold()
+        pdf_path = pdf_map.get(tomo_key)
+        if pdf_path is None:
+            print(f"  WARN: no se encontró PDF para {tomo}, omitiendo")
+            continue
+
+        pages = _tune_pick_pages(grouped[tomo], sample_pages)
+        print(f"\nTuneando {tomo} (dist={candidate['distance']:.3f}, páginas muestra: {pages})...")
+
+        # Renderizar páginas de muestra
+        rendered = {}
+        for p in pages:
+            rendered[p] = _tune_render_page(pdf_path, p)
+
+        # Probar cada perfil del grid
+        profile_results = []
+        for grid_entry in TUNE_PARAM_GRID:
+            params = dict(_TUNE_BASE)
+            params.update({k: v for k, v in grid_entry.items() if k != "name"})
+            profile_name = grid_entry["name"]
+
+            page_metrics = []
+            for page, bgr in rendered.items():
+                img_bin = _tune_process_array(bgr, params)
+                row = {"tomo": tomo, "page_num": page}
+                row.update(_tune_image_metrics(img_bin))
+                page_metrics.append(row)
+
+            stats = _tune_summary(page_metrics)
+            dist = _tune_distance(stats, target_stats)
+            profile_results.append({
+                "tomo": tomo,
+                "profile": profile_name,
+                "distance": dist,
+                "params": {k: v for k, v in params.items() if k not in ("target_dpi", "zoom", "bin_method", "block_size", "C")},
+            })
+            results_rows.append({
+                "tomo": tomo, "profile": profile_name, "distance": dist,
+                **{k: v for k, v in params.items()},
+            })
+
+        profile_results.sort(key=lambda r: r["distance"])
+        best = profile_results[0]
+        baseline_match = next(r for r in profile_results if r["profile"] == "baseline")
+        improvement = 100.0 * (baseline_match["distance"] - best["distance"]) / max(baseline_match["distance"], 1e-6)
+
+        print(f"  Mejor: {best['profile']} (dist={best['distance']:.3f}, mejora={improvement:.1f}%)")
+
+        # Solo actualizar si hay mejora real y no es baseline
+        if best["profile"] != "baseline" and improvement > 5.0:
+            new_overrides[tomo] = best["params"]
+            print(f"  → Perfil actualizado: {best['params']}")
+        elif tomo in new_overrides:
+            print(f"  → Mantiene perfil actual")
+        else:
+            print(f"  → Sin mejora significativa, usa baseline")
+
+    # 5. Exportar resultados CSV
+    if results_rows:
+        import csv
+        csv_path = out_dir / "tuning_results.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(results_rows)
+        print(f"\nResultados CSV: {csv_path}")
+
+    # 6. Actualizar el script
+    print(f"\nActualizando PREPROCESS_PROFILE_OVERRIDES en {Path(__file__).name}...")
+    _tune_update_script(new_overrides)
+    print("Perfiles actualizados:")
+    for tomo, params in sorted(new_overrides.items()):
+        print(f"  {tomo}: {params}")
+
+    return new_overrides
+
 
 # -------------------- Núcleo (array) --------------------
 def _process_array(
@@ -502,9 +800,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Preprocesa imágenes/PDFs para OCR"
     )
-    parser.add_argument("--in", dest="inp", required=True,
+    parser.add_argument("--in", dest="inp",
                         help="Directorio de entrada con imágenes/PDFs")
-    parser.add_argument("--out", required=True,
+    parser.add_argument("--out",
                         help="Directorio de salida")
     parser.add_argument("--target-dpi", type=int, default=300)
     parser.add_argument("--zoom", type=float, default=1.15)
@@ -523,25 +821,79 @@ def main():
     parser.add_argument("--no-recursive", action="store_true",
                         help="No buscar recursivamente en subdirectorios")
 
+    # Tuning
+    parser.add_argument("--tune", action="store_true",
+                        help="Grid search de parámetros por tomo. "
+                             "Requiere --in (PDFs), --out (preprocessed). "
+                             "Actualiza perfiles en el script y luego preprocesa.")
+    parser.add_argument("--reference-tomo", default="Tomo I",
+                        help="Tomo de referencia para tuning (default: Tomo I)")
+    parser.add_argument("--sample-pages", type=int, default=6,
+                        help="Páginas de muestra por tomo candidato (default: 6)")
+    parser.add_argument("--max-candidates", type=int, default=6,
+                        help="Máximo de tomos candidatos a tunear (default: 6)")
+    parser.add_argument("--tune-only", action="store_true",
+                        help="Solo tunear, no ejecutar preprocesamiento después")
+
     args = parser.parse_args()
 
-    result = preprocess(
-        inp=args.inp,
-        out=args.out,
-        target_dpi=args.target_dpi,
-        zoom=args.zoom,
-        bg_ksize=args.bg_ksize,
-        bin_method=args.bin_method,
-        block_size=args.block_size,
-        C=args.C,
-        sauvola_w=args.sauvola_w,
-        sauvola_k=args.sauvola_k,
-        close_ksize=args.close_ksize,
-        open_ksize=args.open_ksize,
-        denoise_ksize=args.denoise_ksize,
-        save_debug=args.save_debug,
-        recursive=not args.no_recursive,
-    )
+    if args.tune:
+        if not args.inp or not args.out:
+            parser.error("--tune requiere --in (dir de PDFs crudos) y --out (dir de preprocesados)")
+        new_profiles = tune(
+            raw_dir=Path(args.inp),
+            prep_dir=Path(args.out),
+            out_dir=Path(args.out) / "_tuning",
+            reference_tomo=args.reference_tomo,
+            sample_pages=args.sample_pages,
+            max_candidates=args.max_candidates,
+        )
+        if args.tune_only:
+            print("\n--tune-only: preprocesamiento omitido.")
+            return
+
+        # Recargar perfiles actualizados en memoria
+        PREPROCESS_PROFILE_OVERRIDES.clear()
+        PREPROCESS_PROFILE_OVERRIDES.update(new_profiles)
+
+        print(f"\nEjecutando preprocesamiento con perfiles actualizados...")
+        result = preprocess(
+            inp=args.inp,
+            out=args.out,
+            target_dpi=args.target_dpi,
+            zoom=args.zoom,
+            bg_ksize=args.bg_ksize,
+            bin_method=args.bin_method,
+            block_size=args.block_size,
+            C=args.C,
+            sauvola_w=args.sauvola_w,
+            sauvola_k=args.sauvola_k,
+            close_ksize=args.close_ksize,
+            open_ksize=args.open_ksize,
+            denoise_ksize=args.denoise_ksize,
+            save_debug=args.save_debug,
+            recursive=not args.no_recursive,
+        )
+    else:
+        if not args.inp or not args.out:
+            parser.error("Se requiere --in y --out")
+        result = preprocess(
+            inp=args.inp,
+            out=args.out,
+            target_dpi=args.target_dpi,
+            zoom=args.zoom,
+            bg_ksize=args.bg_ksize,
+            bin_method=args.bin_method,
+            block_size=args.block_size,
+            C=args.C,
+            sauvola_w=args.sauvola_w,
+            sauvola_k=args.sauvola_k,
+            close_ksize=args.close_ksize,
+            open_ksize=args.open_ksize,
+            denoise_ksize=args.denoise_ksize,
+            save_debug=args.save_debug,
+            recursive=not args.no_recursive,
+        )
 
     print(f"\nResultado: {len(result['processed'])} procesados, {len(result['errors'])} errores")
     for e in result["errors"]:
