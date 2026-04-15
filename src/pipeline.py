@@ -503,7 +503,7 @@ def generar_pages_desde_yolo_ocr(
     yolo_model_path: Path,
     tomos_filter: set[str] | None = None,
     yolo_conf: float = 0.25,
-    yolo_imgsz: int = 1024,
+    yolo_imgsz: int = 640,
     yolo_batch: int = 4,
     ocr_model: str = "deepseek-ai/DeepSeek-OCR",
     ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
@@ -1763,9 +1763,9 @@ def run_pipeline(
     images_dir: Path | None = None,
     pages_dir: Path | None = None,
     tomos_filter: set[str] | None = None,
-    yolo_model_path: Path = Path("yolov8s.pt"),
+    yolo_model_path: Path = Path("models/yolo_obb_v1/weights/best.pt"),
     yolo_conf: float = 0.25,
-    yolo_imgsz: int = 1024,
+    yolo_imgsz: int = 640,
     yolo_batch: int = 4,
     ocr_model: str = "deepseek-ai/DeepSeek-OCR",
     ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
@@ -2012,8 +2012,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--yolo-model",
-        default="yolov8s.pt",
-        help="Path al modelo YOLO para detectar boxes (default: yolov8s.pt)",
+        default="models/yolo_obb_v1/weights/best.pt",
+        help="Path al modelo YOLO para detectar boxes (default: models/yolo_obb_v1/weights/best.pt)",
     )
     parser.add_argument(
         "--yolo-conf",
@@ -2024,8 +2024,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--yolo-imgsz",
         type=int,
-        default=1024,
-        help="Tamano de inferencia YOLO (default: 1024)",
+        default=640,
+        help="Tamano de inferencia YOLO (default: 640)",
     )
     parser.add_argument(
         "--yolo-batch",
