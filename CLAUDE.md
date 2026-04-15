@@ -27,21 +27,25 @@ py src/preprocess.py --in data/raw --out data/preprocessed --target-dpi 300 --sa
 py src/inferir_yolo_obb.py --images-dir data/preprocess_v2 --out outputs/segmentacion_obb
 py src/inferir_yolo_obb.py --visualizar --n 100 --out outputs/inferencia_obb  # debug: boxes dibujadas
 
-# 2. Run OCR batch
+# 2. Run OCR batch (standalone, sin YOLO)
 py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo I*_prep.png" --out outputs
 
-# 3. Run full post-OCR pipeline (consolidation + segmentation + parsing + sequence correction + diagnosis + entities)
-py src/pipeline.py
-py src/pipeline.py --skip-entidades                    # sin entidades
-py src/pipeline.py --reocr-dir outputs/run_XXX/reocr   # con merge de re-OCR
+# 3. Run full pipeline (YOLO + OCR + post-processing + entities + panel + red)
+py src/pipeline.py --images-dir data/preprocess_v2     # desde imagenes (YOLO + OCR + todo)
+py src/pipeline.py --pages-dir outputs/pages            # desde pages existentes (salta YOLO+OCR)
+py src/pipeline.py --skip-entidades                     # sin entidades
+py src/pipeline.py --skip-red-personas                  # sin red de personas
+py src/pipeline.py --tomos "Tomo I,Tomo III"            # filtrar tomos
+py src/pipeline.py --reocr-dir outputs/run_XXX/reocr    # con merge de re-OCR
+py src/pipeline.py --yolo-model yolov8s-obb.pt --yolo-conf 0.3  # configurar YOLO
 
 # 4. Re-OCR focalizado (paginas con contratos perdidos)
 py src/reocr_perdidos.py --diagnostico outputs/run_XXX/diagnostico_reocr.xlsx --images-dir data/preprocess_v2 --original-pages outputs/pages --output-dir outputs/run_XXX/reocr
 
-# 5. Panelizar compilado (una fila por entidad por contrato)
+# 5. Panelizar compilado (standalone)
 py src/panelizar.py --compilado outputs/run_XXX/compilado.xlsx
 
-# 6. Red de co-ocurrencia de personas
+# 6. Red de co-ocurrencia de personas (standalone)
 py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ```
 
@@ -55,17 +59,20 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 
 2. **`src/ocr_model_deepseek.py`** — Batch OCR using DeepSeek-OCR (HuggingFace Transformers). Produces per-page text in `outputs/pages/<tomo>_p<NNNN>/result.txt`. Auto-detects device, retry logic (3 retries with alternate prompts), resume support. Validates output with quality flags: `vacio`, `solo_tags`, `muy_corto`, `bajo_alfa`, `texto_repetitivo`.
 
-3. **`src/pipeline.py`** — Main post-OCR orchestrator (9 steps):
-   - **Step 0**: Merge selectivo con re-OCR (si `--reocr-dir`; usa re-OCR si new_lines > lost_lines AND < 30KB)
+3. **`src/pipeline.py`** — Main orchestrator (YOLO + OCR + post-processing, up to 12 steps):
+   - **Step 0** (if `--images-dir`, no `--pages-dir`): YOLO detection (`ultralytics`) → crop boxes → DeepSeek-OCR per crop → recompose `result.txt` per page
+   - **Step 0b** (if `--reocr-dir`): Merge selectivo con re-OCR (usa re-OCR si new_lines > lost_lines AND < 30KB)
    - **Step 1**: Calidad OCR (flags por pagina)
-   - **Step 2**: Consolidacion de tomos (union inteligente de paginas con heuristica de saltos de linea)
+   - **Step 2**: Limpieza de paginas (drop angle brackets, headers "Catálogo de los Fondos Americanos" via Levenshtein, dedup lineas consecutivas) + consolidacion de tomos (union inteligente con heuristica de saltos de linea)
    - **Step 3**: Segmentacion de contratos (fuzzy "Libro del año" via Levenshtein ≤ 3)
    - **Step 4**: Parseo de campos estructurados (año, oficio, escribania, etc.)
    - **Step 5**: Cruce de flags OCR a nivel contrato
    - **Step 6**: Correccion de secuencia id_num (anclas + relleno + diagnostico)
    - **Step 7**: Re-segmentacion de contratos "enterrados" en el texto de otros
    - **Step 8**: Diagnostico de paginas para re-OCR
-   - **Step 9**: Extraccion de entidades via Ollama (opcional, `--skip-entidades` para saltar)
+   - **Step 9**: Extraccion de entidades via Ollama (opcional, `--skip-entidades` para saltar). Incluye `atributos` por persona.
+   - **Step 10**: Panelizar (integrado, genera panel.xlsx + panel_headers.xlsx + panel_por_tipo.xlsx)
+   - **Step 11**: Red de personas (integrado, opcional `--skip-red-personas`)
 
 4. **`src/parseo_compilado.py`** — Módulo de parseo importado por pipeline.py. Extrae campos: macrodatos, año, oficio, libro, escribania, folio, fecha, signatura, asunto, observaciones.
 
@@ -92,27 +99,34 @@ models/yolo_obb_v1/         (modelo YOLO OBB entrenado)
 └── weights/best.pt         (peso entrenado, SÍ en git)
 
 data/preprocess_v2/*_prep.png
-  → src/inferir_yolo_obb.py → outputs/segmentacion_obb/
-        ├── manifest.csv             (página, box_id, clase, confianza, coords OBB)
-        └── crops/*.png              (recortes individuales por contrato)
-  → src/ocr_model_deepseek.py → outputs/pages/<Tomo>_p<NNNN>/result.txt
-    → src/pipeline.py → outputs/run_YYYYMMDD_HHMMSS/
-        ├── calidad_ocr.csv
-        ├── tomos_txt/*.txt          (16 tomos consolidados)
-        ├── contratos_segmentados.xlsx
-        ├── compilado.xlsx           (dataset final con entidades)
-        ├── diagnostico_reocr.xlsx
-        ├── panel.xlsx               (formato largo)
-        ├── red_personas.gexf        (red para Gephi)
-        └── red_personas_*.csv
+  → outputs/run_YYYYMMDD_HHMMSS/
+      ├── crops/                   (recortes YOLO por pagina)
+      ├── boxes_manifest.csv       (manifest de boxes detectados)
+      ├── ocr_boxes.csv            (OCR tabular por box)
+      ├── pages/                   (result.txt recompuesto por pagina)
+      ├── pages_merged/            (si --reocr-dir)
+      ├── pages_filtered/          (si --tomos)
+      ├── calidad_ocr.csv
+      ├── tomos_txt/*.txt          (tomos consolidados)
+      ├── contratos_segmentados.xlsx
+      ├── compilado.xlsx           (dataset final con entidades + atributos)
+      ├── diagnostico_reocr.xlsx
+      ├── panel.xlsx               (formato largo)
+      ├── panel_headers.xlsx       (filas header separadas)
+      ├── panel_por_tipo.xlsx      (multi-hoja por tipo entidad)
+      ├── red_personas.gexf        (red para Gephi)
+      ├── red_personas_nodos.csv
+      ├── red_personas_aristas.csv
+      └── red_personas_stats.txt
 ```
 
 ### Key Data Conventions
 
 - **Entity columns** (`personas`, `naos`, `lugares`): semicolon-delimited strings, NOT JSON (e.g., `"Juan; Pedro; María"`)
+- **Atributos column**: pipe-delimited persona attributes (e.g., `"Juan Pérez::vecino de Sevilla || María López::viuda"`)
 - **Nullable integers**: `id_num`, `año_num` use pandas `Int64` dtype for Excel compatibility
 - **Encoding**: UTF-8 preferred, silent fallback to latin-1 on decode errors
-- **OCR flags**: space-separated strings (e.g., `"bajo_alfa; script_no_latino"`)
+- **OCR flags**: semicolon-separated strings (e.g., `"bajo_alfa; script_no_latino"`)
 - **Tomo ID normalization**: spaces → underscores in DataFrames (e.g., `Tomo I` → `Tomo_I`)
 - **Checkpointing**: OCR skips pages with existing `result.txt` when `--resume`; entity extraction saves `compilado_parcial.xlsx` every 500 contracts
 - **Preprocess profiles**: `src/preprocess.py` aplica overrides por tomo para los tomos ya tuneados
@@ -136,8 +150,9 @@ data/preprocess_v2/*_prep.png
 
 ### External Dependencies
 
-- **DeepSeek-OCR**: `deepseek-ai/DeepSeek-OCR` model via HuggingFace (loaded with `trust_remote_code=True`).
-- **Ollama**: Local inference server at `http://localhost:11434/api/generate` for entity extraction with `qwen2.5:7b`. Health check via GET `/api/tags`. 120s timeout per request.
+- **YOLO (ultralytics)**: Object detection for text region boxes. Default model `yolov8s.pt` (also `yolov8s-obb.pt` for oriented bounding boxes). Supports OBB and standard boxes with fallback to full-page crop.
+- **DeepSeek-OCR**: `deepseek-ai/DeepSeek-OCR` model via HuggingFace (loaded with `trust_remote_code=True`). Used for per-crop OCR with retry logic and quality validation.
+- **Ollama**: Local inference server at `http://localhost:11434/api/generate` for entity extraction with `qwen3.5:9b` (default). Health check via GET `/api/tags`. 120s timeout per request.
 
 ## Language
 

@@ -22,7 +22,7 @@ pip install -r requirements.txt
 | 3 | `src/pipeline.py` | Orquestador post-OCR: consolidación, segmentación, parseo, corrección de secuencia, diagnóstico y extracción de entidades |
 | 4 | `src/reocr_perdidos.py` | Re-OCR focalizado de páginas con contratos perdidos |
 | 5 | `src/panelizar.py` | Conversión a formato panel largo (una fila por entidad) |
-| 6 | `src/red_personas.py` | Red de co-ocurrencia de personas (GEXF + CSVs) |
+| 6 | `src/red_personas.py` | Red de co-ocurrencia de personas (se ejecuta automáticamente al final de `src/pipeline.py`; también puede correrse aparte) |
 
 Módulos auxiliares:
 - `src/parseo_compilado.py` — parser de campos estructurados, importado por `pipeline.py`
@@ -49,6 +49,7 @@ py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo*_prep.
 py src/pipeline.py                                          # con entidades
 py src/pipeline.py --skip-entidades                         # sin entidades
 py src/pipeline.py --reocr-dir outputs/run_XXX/reocr        # con merge de re-OCR previo
+py src/pipeline.py --skip-red-personas                      # sin exportar red_personas.*
 
 # 4. Re-OCR focalizado
 py src/reocr_perdidos.py --diagnostico outputs/run_XXX/diagnostico_reocr.xlsx \
@@ -58,7 +59,7 @@ py src/reocr_perdidos.py --diagnostico outputs/run_XXX/diagnostico_reocr.xlsx \
 # 5. Panelizar
 py src/panelizar.py --compilado outputs/run_XXX/compilado.xlsx
 
-# 6. Red de personas
+# 6. Red de personas (opcional; el pipeline principal ya la genera)
 py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ```
 

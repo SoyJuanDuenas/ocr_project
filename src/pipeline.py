@@ -1,25 +1,36 @@
 """
-Pipeline post-OCR completo.
+Pipeline OCR completo.
 
-Lee outputs/pages/*/result.txt (resultado del OCR) y produce:
-  - calidad_ocr.csv             flaggeo de paginas problematicas
-  - tomos_txt/                  texto consolidado por tomo (union inteligente)
-  - contratos_segmentados.xlsx  segmentacion cruda por contratos
-  - compilado.xlsx              campos parseados + entidades + flags OCR
+Por defecto:
+  imagenes preprocesadas -> YOLO -> recortes -> OCR por recorte -> postproceso
+
+Produce dentro de outputs/run_*/:
+  - boxes_manifest.csv          manifest por box detectado
+  - ocr_boxes.csv              OCR tabular por box
+  - pages/*/result.txt         texto recompuesto por pagina desde boxes
+  - calidad_ocr.csv            flaggeo de paginas problematicas
+  - tomos_txt/                 texto consolidado por tomo
+  - contratos_segmentados.xlsx segmentacion cruda por contratos
+  - compilado.xlsx             campos parseados + entidades + flags OCR
 
 Uso:
   python src/pipeline.py
-  python src/pipeline.py --pages-dir outputs/pages --output-base outputs
+  python src/pipeline.py --images-dir data/preprocess_v2
+  python src/pipeline.py --pages-dir outputs/pages
   python src/pipeline.py --skip-entidades
 """
 from __future__ import annotations
 
+import os
 import sys
 import re
 import json
+import glob
+import logging
 import unicodedata
 import time
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from collections import Counter, defaultdict
@@ -30,10 +41,44 @@ import pandas as pd
 import requests
 
 from panelizar import panelizar, separar_headers, exportar_panel_multihoja
+from red_personas import construir_red, exportar as exportar_red_personas
 
 # Importar funciones de parseo desde modulo hermano
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parseo_compilado import parsear_texto, contar_subregistros
+from ocr_model_deepseek import (
+    _PROMPTS_RETRY as OCR_PROMPTS_RETRY,
+    _infer_una_pagina as _ocr_infer_una_pagina,
+    _load_tokenizer_and_model as _ocr_load_tokenizer_and_model,
+    _select_device as _ocr_select_device,
+    _select_dtype as _ocr_select_dtype,
+    _validar_output as _ocr_validar_output,
+)
+
+# =====================================================================
+# Logging
+# =====================================================================
+
+logger = logging.getLogger("pipeline")
+logger.setLevel(logging.DEBUG)
+
+# Handler consola (INFO+)
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter(
+    "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S"
+))
+logger.addHandler(_console_handler)
+
+
+def _add_file_handler(log_path: Path) -> None:
+    """Agrega handler de archivo al logger (DEBUG+, con timestamps completos)."""
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(fh)
 
 
 # =====================================================================
@@ -41,6 +86,7 @@ from parseo_compilado import parsear_texto, contar_subregistros
 # =====================================================================
 
 TOMO_PAGE_RE = re.compile(r"^(?P<tomo>.+?)_p(?P<page>\d+)$")
+IMAGE_PAGE_RE = re.compile(r"^(?P<tomo>.+?)_p(?P<page>\d+)_prep\.\w+$", re.I)
 
 
 def _normalizar_tomo(nombre: str) -> str:
@@ -70,6 +116,31 @@ def _sanitize_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
 
 
+def _normalize_tomo_selector(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    value = value.replace("_", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    m = re.match(r"^(?i:tomo)\s+(.*)$", value)
+    if m:
+        suffix = m.group(1).strip()
+    else:
+        suffix = value
+    return f"Tomo {suffix.upper()}".strip()
+
+
+def _parse_tomos_arg(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    tomos = {
+        _normalize_tomo_selector(part)
+        for part in raw.split(",")
+        if _normalize_tomo_selector(part)
+    }
+    return tomos
+
+
 def _levenshtein(a: str, b: str) -> int:
     a, b = a.lower(), b.lower()
     n, m = len(a), len(b)
@@ -83,6 +154,387 @@ def _levenshtein(a: str, b: str) -> int:
             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb))
         prev = curr
     return prev[m]
+
+
+def _parse_image_page(path: Path) -> dict:
+    m = IMAGE_PAGE_RE.match(path.name)
+    if not m:
+        return {"tomo": None, "page_num": None, "page_label": None}
+    tomo = _normalizar_tomo(m.group("tomo").strip())
+    page_num = int(m.group("page"))
+    return {
+        "tomo": tomo,
+        "page_num": page_num,
+        "page_label": f"{tomo}_p{page_num:04d}",
+    }
+
+
+def _listar_imagenes_preprocesadas(images_dir: Path, tomos_filter: set[str] | None = None) -> list[Path]:
+    images = [
+        p for p in glob.glob(str(images_dir / "*_prep.*"))
+        if Path(p).is_file() and IMAGE_PAGE_RE.match(Path(p).name)
+    ]
+    image_paths = [Path(p) for p in images]
+    if tomos_filter:
+        image_paths = [p for p in image_paths if _parse_image_page(p)["tomo"] in tomos_filter]
+    image_paths.sort(key=lambda p: (
+        _parse_image_page(p)["tomo"] or "",
+        _parse_image_page(p)["page_num"] or 10**9,
+        p.name.lower(),
+    ))
+    return image_paths
+
+
+def _clamp_box(x1: int, y1: int, x2: int, y2: int, width: int, height: int) -> tuple[int, int, int, int]:
+    x1 = max(0, min(x1, width))
+    y1 = max(0, min(y1, height))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+    if x2 <= x1:
+        x2 = min(width, x1 + 1)
+    if y2 <= y1:
+        y2 = min(height, y1 + 1)
+    return x1, y1, x2, y2
+
+
+def _rows_from_yolo_result(result, image_path: Path) -> list[dict]:
+    meta = _parse_image_page(image_path)
+    names = result.names if isinstance(result.names, dict) else {}
+    rows: list[dict] = []
+
+    try:
+        height, width = result.orig_shape[:2]
+    except Exception:
+        import cv2
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise RuntimeError(f"No se pudo leer imagen {image_path}")
+        height, width = img.shape[:2]
+
+    def _class_name(class_id: int) -> str:
+        return str(names.get(class_id, class_id))
+
+    if getattr(result, "obb", None) is not None and len(result.obb) > 0:
+        polys = result.obb.xyxyxyxy.cpu().numpy()
+        confs = result.obb.conf.cpu().numpy()
+        classes = result.obb.cls.cpu().numpy().astype(int)
+        for poly, conf, cls_id in zip(polys, confs, classes):
+            xs = poly[:, 0]
+            ys = poly[:, 1]
+            x1, y1, x2, y2 = _clamp_box(
+                int(np.floor(xs.min())),
+                int(np.floor(ys.min())),
+                int(np.ceil(xs.max())),
+                int(np.ceil(ys.max())),
+                width,
+                height,
+            )
+            rows.append({
+                **meta,
+                "image_path": str(image_path),
+                "class_id": int(cls_id),
+                "class_name": _class_name(int(cls_id)),
+                "conf": float(conf),
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "image_width": width,
+                "image_height": height,
+            })
+    elif getattr(result, "boxes", None) is not None and len(result.boxes) > 0:
+        xyxy = result.boxes.xyxy.cpu().numpy()
+        confs = result.boxes.conf.cpu().numpy()
+        classes = result.boxes.cls.cpu().numpy().astype(int)
+        for coords, conf, cls_id in zip(xyxy, confs, classes):
+            x1, y1, x2, y2 = _clamp_box(
+                int(np.floor(coords[0])),
+                int(np.floor(coords[1])),
+                int(np.ceil(coords[2])),
+                int(np.ceil(coords[3])),
+                width,
+                height,
+            )
+            rows.append({
+                **meta,
+                "image_path": str(image_path),
+                "class_id": int(cls_id),
+                "class_name": _class_name(int(cls_id)),
+                "conf": float(conf),
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "image_width": width,
+                "image_height": height,
+            })
+
+    if not rows:
+        rows.append({
+            **meta,
+            "image_path": str(image_path),
+            "class_id": -1,
+            "class_name": "page_fallback",
+            "conf": 1.0,
+            "x1": 0,
+            "y1": 0,
+            "x2": width,
+            "y2": height,
+            "image_width": width,
+            "image_height": height,
+        })
+
+    rows.sort(key=lambda r: (r["y1"], r["x1"], -(r["y2"] - r["y1"]), -(r["x2"] - r["x1"])))
+    for idx, row in enumerate(rows, start=1):
+        row["sort_idx"] = idx
+        row["box_id"] = f"{idx:04d}"
+    return rows
+
+
+def detectar_boxes_yolo(
+    images_dir: Path,
+    yolo_model_path: Path,
+    tomos_filter: set[str] | None = None,
+    conf: float = 0.25,
+    imgsz: int = 1536,
+    batch: int = 8,
+) -> pd.DataFrame:
+    from ultralytics import YOLO
+
+    image_paths = _listar_imagenes_preprocesadas(images_dir, tomos_filter=tomos_filter)
+    if not image_paths:
+        raise FileNotFoundError(f"No se encontraron imagenes *_prep.* en {images_dir}")
+    if not yolo_model_path.exists():
+        raise FileNotFoundError(f"No existe modelo YOLO: {yolo_model_path}")
+
+    model = YOLO(str(yolo_model_path))
+    rows: list[dict] = []
+    results = model.predict(
+        source=[str(p) for p in image_paths],
+        conf=conf,
+        imgsz=imgsz,
+        batch=batch,
+        stream=True,
+        verbose=False,
+    )
+
+    total = len(image_paths)
+    for idx, (image_path, result) in enumerate(zip(image_paths, results), start=1):
+        rows.extend(_rows_from_yolo_result(result, image_path))
+        if idx % 100 == 0 or idx == total:
+            logger.info(f"YOLO: {idx:,}/{total:,} paginas")
+
+    return pd.DataFrame(rows)
+
+
+def _crop_rows_for_image(image_path: str, rows: list[dict], crops_dir: Path) -> list[dict]:
+    import cv2
+
+    img = cv2.imread(image_path)
+    result_rows: list[dict] = []
+    if img is None:
+        for row in rows:
+            result_rows.append({**row, "crop_path": "", "crop_width": 0, "crop_height": 0, "crop_area": 0, "status": "image_read_error"})
+        return result_rows
+
+    for row in rows:
+        x1, y1, x2, y2 = int(row["x1"]), int(row["y1"]), int(row["x2"]), int(row["y2"])
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            result_rows.append({**row, "crop_path": "", "crop_width": 0, "crop_height": 0, "crop_area": 0, "status": "empty_crop"})
+            continue
+        page_dir = crops_dir / row["page_label"]
+        page_dir.mkdir(parents=True, exist_ok=True)
+        crop_path = page_dir / f"{row['box_id']}.png"
+        ok = cv2.imwrite(str(crop_path), crop)
+        h, w = crop.shape[:2]
+        result_rows.append({
+            **row,
+            "crop_path": str(crop_path),
+            "crop_width": int(w),
+            "crop_height": int(h),
+            "crop_area": int(w * h),
+            "status": "cropped" if ok else "crop_write_error",
+        })
+    return result_rows
+
+
+def guardar_crops_y_manifest(df_boxes: pd.DataFrame, run_dir: Path) -> pd.DataFrame:
+    crops_dir = run_dir / "crops"
+    crops_dir.mkdir(exist_ok=True)
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in df_boxes.to_dict("records"):
+        grouped[row["image_path"]].append(row)
+
+    rows_out: list[dict] = []
+    max_workers = min(8, max(1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_crop_rows_for_image, image_path, rows, crops_dir)
+            for image_path, rows in grouped.items()
+        ]
+        for fut in as_completed(futures):
+            rows_out.extend(fut.result())
+
+    df_manifest = pd.DataFrame(rows_out)
+    df_manifest = df_manifest.sort_values(["tomo", "page_num", "sort_idx"]).reset_index(drop=True)
+    manifest_path = run_dir / "boxes_manifest.csv"
+    df_manifest.to_csv(manifest_path, index=False, encoding="utf-8-sig")
+    logger.info(f"{len(df_manifest):,} boxes en manifest: {manifest_path}")
+    return df_manifest
+
+
+def _ocr_texto_crop(model, tokenizer, crop_path: str, prompt: str, tmp_dir: Path, max_retries: int) -> tuple[str, str, str]:
+    prompts = [prompt] + OCR_PROMPTS_RETRY[:max(max_retries - 1, 0)]
+    best_text = ""
+    best_flags: list[str] = ["vacio"]
+
+    for try_prompt in prompts:
+        try:
+            res_text = _ocr_infer_una_pagina(
+                model,
+                tokenizer,
+                prompt=try_prompt,
+                img_path=crop_path,
+                out_dir=str(tmp_dir),
+                save_per_page=False,
+                capture_stdout_fallback=True,
+            )
+            is_valid, flags = _ocr_validar_output(res_text or "")
+            if not best_text:
+                best_text = res_text or ""
+                best_flags = flags
+            if is_valid:
+                return (res_text or "").strip(), "OK", "; ".join(flags)
+            best_text = res_text or best_text
+            best_flags = flags
+        except Exception as e:
+            best_flags = [f"error: {e}"]
+    return best_text.strip(), "DEGRADADO", "; ".join(best_flags)
+
+
+def ocr_boxes_a_paginas(
+    df_manifest: pd.DataFrame,
+    run_dir: Path,
+    model_name: str = "deepseek-ai/DeepSeek-OCR",
+    prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
+    device: str | None = None,
+    dtype: str = "bfloat16",
+    max_new_tokens: int = 4096,
+    max_retries: int = 3,
+) -> Path:
+    import torch
+
+    pages_dir = run_dir / "pages"
+    pages_dir.mkdir(exist_ok=True)
+    tmp_dir = run_dir / "_tmp_ocr"
+    tmp_dir.mkdir(exist_ok=True)
+
+    df_ok = df_manifest[df_manifest["status"] == "cropped"].copy()
+    if df_ok.empty:
+        raise RuntimeError("No hay crops validos para OCR")
+
+    # Mejor throughput: crops pequeños primero; mantenemos un solo modelo GPU cargado.
+    df_ok = df_ok.sort_values(["crop_area", "crop_height", "crop_width", "page_label", "sort_idx"])
+
+    ocr_device = _ocr_select_device(device)
+    torch_dtype = _ocr_select_dtype(dtype, ocr_device)
+    tokenizer, model = _ocr_load_tokenizer_and_model(
+        model_name,
+        attn_impl=None,
+        device=ocr_device,
+        dtype=torch_dtype,
+    )
+    if max_new_tokens and hasattr(model, "generation_config"):
+        model.generation_config.max_new_tokens = max_new_tokens
+
+    rows_out: list[dict] = []
+    page_chunks: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    total = len(df_ok)
+    t0 = time.time()
+
+    for count, row in enumerate(df_ok.to_dict("records"), start=1):
+        text, ocr_status, ocr_flags = _ocr_texto_crop(
+            model,
+            tokenizer,
+            row["crop_path"],
+            prompt,
+            tmp_dir,
+            max_retries,
+        )
+        rows_out.append({
+            **row,
+            "ocr_text": text,
+            "ocr_chars": len(text),
+            "ocr_status": ocr_status,
+            "ocr_flags": ocr_flags,
+        })
+        if text:
+            page_chunks[row["page_label"]].append((int(row["sort_idx"]), text))
+
+        if count % 100 == 0 or count == total:
+            elapsed = time.time() - t0
+            rate = count / elapsed if elapsed > 0 else 0
+            logger.info(f"OCR boxes: {count:,}/{total:,} | {rate:.1f} crops/s")
+
+        if ocr_device == "cuda":
+            torch.cuda.empty_cache()
+
+    df_ocr = pd.DataFrame(rows_out)
+    ocr_path = run_dir / "ocr_boxes.csv"
+    df_ocr.to_csv(ocr_path, index=False, encoding="utf-8-sig")
+
+    for page_label in df_manifest["page_label"].dropna().unique():
+        page_dir = pages_dir / page_label
+        page_dir.mkdir(exist_ok=True)
+        chunks = sorted(page_chunks.get(page_label, []), key=lambda x: x[0])
+        page_text = "\n".join(t for _, t in chunks if t.strip())
+        (page_dir / "result.txt").write_text(page_text, encoding="utf-8")
+
+    logger.info(f"OCR por box exportado: {ocr_path}")
+    logger.info(f"Paginas recompuestas en: {pages_dir}")
+    return pages_dir
+
+
+def generar_pages_desde_yolo_ocr(
+    images_dir: Path,
+    run_dir: Path,
+    yolo_model_path: Path,
+    tomos_filter: set[str] | None = None,
+    yolo_conf: float = 0.25,
+    yolo_imgsz: int = 1024,
+    yolo_batch: int = 4,
+    ocr_model: str = "deepseek-ai/DeepSeek-OCR",
+    ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
+    ocr_device: str | None = None,
+    ocr_dtype: str = "bfloat16",
+    ocr_max_new_tokens: int = 4096,
+    ocr_max_retries: int = 3,
+) -> Path:
+    logger.info(f"Imagenes: {images_dir}")
+    logger.info(f"YOLO: {yolo_model_path} | conf={yolo_conf} | imgsz={yolo_imgsz} | batch={yolo_batch}")
+    logger.info(f"OCR: {ocr_model}")
+
+    df_boxes = detectar_boxes_yolo(
+        images_dir=images_dir,
+        yolo_model_path=yolo_model_path,
+        tomos_filter=tomos_filter,
+        conf=yolo_conf,
+        imgsz=yolo_imgsz,
+        batch=yolo_batch,
+    )
+    df_manifest = guardar_crops_y_manifest(df_boxes, run_dir)
+    return ocr_boxes_a_paginas(
+        df_manifest=df_manifest,
+        run_dir=run_dir,
+        model_name=ocr_model,
+        prompt=ocr_prompt,
+        device=ocr_device,
+        dtype=ocr_dtype,
+        max_new_tokens=ocr_max_new_tokens,
+        max_retries=ocr_max_retries,
+    )
 
 
 # =====================================================================
@@ -174,7 +626,7 @@ def flaggear_ocr(pages_dir: Path, run_dir: Path) -> pd.DataFrame:
     df.to_csv(out_path, index=False, encoding="utf-8-sig")
 
     n_flag = int(df["flagged"].sum())
-    print(f"  {len(df):,} paginas evaluadas, {n_flag} flaggeadas")
+    logger.info(f"{len(df):,} paginas evaluadas, {n_flag} flaggeadas")
     if n_flag > 0:
         all_flags = [
             f
@@ -183,7 +635,7 @@ def flaggear_ocr(pages_dir: Path, run_dir: Path) -> pd.DataFrame:
             if f
         ]
         for f, c in Counter(all_flags).most_common():
-            print(f"    {f}: {c}")
+            logger.info(f"  {f}: {c}")
 
     return df
 
@@ -376,7 +828,7 @@ def consolidar_tomos(pages_dir: Path, run_dir: Path) -> Path:
         out_path = tomos_dir / f"{_sanitize_name(tomo)}.txt"
         out_path.write_text(tomo_text, encoding="utf-8")
 
-    print(f"  {len(by_tomo)} tomos consolidados en {tomos_dir}")
+    logger.info(f"{len(by_tomo)} tomos consolidados en {tomos_dir}")
     return tomos_dir
 
 
@@ -477,7 +929,7 @@ def segmentar_tomos(tomos_dir: Path, run_dir: Path) -> pd.DataFrame:
     seg_path = run_dir / "contratos_segmentados.xlsx"
     df_debug.to_excel(seg_path, index=False)
 
-    print(f"  {len(df_main):,} contratos segmentados de {len(tomo_files)} tomos")
+    logger.info(f"{len(df_main):,} contratos segmentados de {len(tomo_files)} tomos")
     return df_main
 
 
@@ -518,7 +970,7 @@ def parsear_contratos(df: pd.DataFrame) -> pd.DataFrame:
     df_out["año_num"] = df_out["año_num"].astype("Int64")
 
     n_ok = int(df_out["_parse_ok"].sum())
-    print(f"  {n_ok:,} / {len(df_out):,} parseados correctamente ({100*n_ok/len(df_out):.1f}%)")
+    logger.info(f"{n_ok:,} / {len(df_out):,} parseados correctamente ({100*n_ok/len(df_out):.1f}%)")
     return df_out
 
 
@@ -559,14 +1011,14 @@ def _cruzar_flags_ocr(df_compilado: pd.DataFrame, df_calidad: pd.DataFrame) -> p
     df["ocr_flagged"] = df["ocr_flag"] != ""
 
     n_flag = int(df["ocr_flagged"].sum())
-    print(f"  {n_flag:,} contratos con flags OCR directas")
+    logger.info(f"{n_flag:,} contratos con flags OCR directas")
     if n_flag > 0:
         all_flags = [
             f for flags in df[df["ocr_flagged"]]["ocr_flag"]
             for f in flags.split("; ") if f
         ]
         for f, c in Counter(all_flags).most_common():
-            print(f"    {f}: {c}")
+            logger.info(f"  {f}: {c}")
     return df
 
 
@@ -675,9 +1127,9 @@ def corregir_secuencia_ids(df: pd.DataFrame) -> pd.DataFrame:
     df["id_num"] = pd.to_numeric(df["id_num"], errors="coerce").astype("Int64")
     df["id_num_original"] = pd.to_numeric(df["id_num_original"], errors="coerce").astype("Int64")
 
-    print(f"  Anclas: {stats['ancla']:,} | Rellenados: {stats['rellenado']:,} | "
-          f"Corregidos: {stats['corregido']:,} | Headers: {stats['header']:,}")
-    print(f"  Contratos perdidos por OCR: {stats['perdido_qty']:,}")
+    logger.info(f"Anclas: {stats['ancla']:,} | Rellenados: {stats['rellenado']:,} | "
+               f"Corregidos: {stats['corregido']:,} | Headers: {stats['header']:,}")
+    logger.info(f"Contratos perdidos por OCR: {stats['perdido_qty']:,}")
     return df
 
 
@@ -824,10 +1276,10 @@ def resegmentar_perdidos(df: pd.DataFrame) -> pd.DataFrame:
 
         df = pd.concat(partes, ignore_index=True)
 
-    print(f"  Gaps analizados: {stats['gaps_analizados']:,}")
-    print(f"  Contratos recuperados por re-segmentacion: {stats['recuperados']:,}")
+    logger.info(f"Gaps analizados: {stats['gaps_analizados']:,}")
+    logger.info(f"Contratos recuperados por re-segmentacion: {stats['recuperados']:,}")
     if indices_modificados:
-        print(f"  Contratos originales modificados (texto truncado): {len(indices_modificados):,}")
+        logger.info(f"Contratos originales modificados (texto truncado): {len(indices_modificados):,}")
 
     return df
 
@@ -1012,10 +1464,10 @@ def diagnosticar_paginas_reocr(
             df_diag.to_excel(writer, sheet_name="contratos_perdidos", index=False)
 
         n_pages = sum(r["paginas_a_reocr"] for r in resumen)
-        print(f"  {len(df_diag):,} contratos perdidos en {n_pages} paginas candidatas")
-        print(f"  Diagnostico exportado: {diag_path}")
+        logger.info(f"{len(df_diag):,} contratos perdidos en {n_pages} paginas candidatas")
+        logger.info(f"Diagnostico exportado: {diag_path}")
     else:
-        print("  Sin contratos perdidos detectados")
+        logger.info("Sin contratos perdidos detectados")
 
     return df_diag
 
@@ -1078,7 +1530,7 @@ def _call_ollama(texto: str, ollama_url: str, model_name: str) -> Dict[str, List
         raw = resp.json().get("response", "{}")
         result = json.loads(raw)
     except Exception as e:
-        print(f"    WARNING: Error en Ollama: {e}")
+        logger.warning(f"Error en Ollama: {e}")
         return {"personas": [], "naos": [], "lugares": [], "atributos": {}}
 
     def _norm(lst):
@@ -1118,15 +1570,15 @@ def extraer_entidades(
 
     # Health check
     if not _check_ollama(ollama_url):
-        print(f"  ERROR: Ollama no disponible en {ollama_url}. Inicia con: ollama serve")
-        print("  Saltando extraccion de entidades.")
+        logger.error(f"Ollama no disponible en {ollama_url}. Inicia con: ollama serve")
+        logger.warning("Saltando extraccion de entidades.")
         df["personas"] = ""
         df["naos"] = ""
         df["lugares"] = ""
         df["atributos"] = ""
         return df
 
-    print(f"  Modelo: {model_name} | URL: {ollama_url}")
+    logger.info(f"Modelo: {model_name} | URL: {ollama_url}")
 
     # Filtrar contratos con asunto no vacio
     mask = df["asunto"].fillna("").str.strip().astype(bool)
@@ -1134,10 +1586,10 @@ def extraer_entidades(
 
     if max_entidades > 0:
         indices = indices[:max_entidades]
-        print(f"  Limitado a {max_entidades} contratos (--max-entidades)")
+        logger.info(f"Limitado a {max_entidades} contratos (--max-entidades)")
 
     total = len(indices)
-    print(f"  {total:,} contratos con asunto para procesar")
+    logger.info(f"{total:,} contratos con asunto para procesar")
 
     personas_col = [""] * len(df)
     naos_col = [""] * len(df)
@@ -1170,8 +1622,8 @@ def extraer_entidades(
             elapsed = time.time() - t0
             rate = count / elapsed if elapsed > 0 else 0
             eta = (total - count) / rate / 60 if rate > 0 else 0
-            print(f"    {count:,}/{total:,} ({100*count/total:.1f}%) "
-                  f"| {rate:.1f} reg/s | ETA: {eta:.0f} min | errores: {errores}")
+            logger.info(f"Entidades: {count:,}/{total:,} ({100*count/total:.1f}%) "
+                       f"| {rate:.1f} reg/s | ETA: {eta:.0f} min | errores: {errores}")
 
         # Checkpoint cada 500
         if count % 500 == 0:
@@ -1189,7 +1641,7 @@ def extraer_entidades(
     df["atributos"] = atributos_col
 
     elapsed = time.time() - t0
-    print(f"  Extraccion completada en {elapsed/60:.1f} min | errores Ollama: {errores}")
+    logger.info(f"Extraccion completada en {elapsed/60:.1f} min | errores Ollama: {errores}")
     return df
 
 
@@ -1219,7 +1671,7 @@ def merge_con_reocr(
 
     reocr_pages_dir = reocr_dir / "pages"
     if not reocr_pages_dir.exists():
-        print(f"  WARN: No existe {reocr_pages_dir}, usando originales")
+        logger.warning(f"No existe {reocr_pages_dir}, usando originales")
         return pages_dir
 
     # Comparar original vs re-OCR para cada pagina con re-OCR disponible
@@ -1272,9 +1724,33 @@ def merge_con_reocr(
             usadas_original += 1
 
     total = usadas_reocr + usadas_original
-    print(f"  {total:,} paginas merged: {usadas_reocr} re-OCR, "
-          f"{usadas_original} original ({garbage} garbage descartados)")
+    logger.info(f"{total:,} paginas merged: {usadas_reocr} re-OCR, "
+               f"{usadas_original} original ({garbage} garbage descartados)")
     return merged_dir
+
+
+def filtrar_pages_por_tomo(pages_dir: Path, run_dir: Path, tomos_filter: set[str]) -> Path:
+    import shutil
+
+    filtered_dir = run_dir / "pages_filtered"
+    filtered_dir.mkdir(exist_ok=True)
+
+    copied = 0
+    for page_dir in sorted(pages_dir.iterdir()):
+        if not page_dir.is_dir():
+            continue
+        meta = _parse_tomo_page(page_dir / "result.txt")
+        if meta["tomo"] not in tomos_filter:
+            continue
+        dest_dir = filtered_dir / page_dir.name
+        dest_dir.mkdir(exist_ok=True)
+        src_result = page_dir / "result.txt"
+        if src_result.exists():
+            shutil.copy2(src_result, dest_dir / "result.txt")
+            copied += 1
+
+    logger.info(f"{copied:,} paginas copiadas tras filtro de tomos")
+    return filtered_dir
 
 
 # =====================================================================
@@ -1283,9 +1759,23 @@ def merge_con_reocr(
 
 
 def run_pipeline(
-    pages_dir: Path,
     output_base: Path,
+    images_dir: Path | None = None,
+    pages_dir: Path | None = None,
+    tomos_filter: set[str] | None = None,
+    yolo_model_path: Path = Path("yolov8s.pt"),
+    yolo_conf: float = 0.25,
+    yolo_imgsz: int = 1024,
+    yolo_batch: int = 4,
+    ocr_model: str = "deepseek-ai/DeepSeek-OCR",
+    ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
+    ocr_device: str | None = None,
+    ocr_dtype: str = "bfloat16",
+    ocr_max_new_tokens: int = 4096,
+    ocr_max_retries: int = 3,
+    solo_ocr: bool = False,
     skip_entidades: bool = False,
+    skip_red_personas: bool = False,
     ollama_url: str = "http://localhost:11434/api/generate",
     ollama_model: str = "qwen3.5:9b",
     max_entidades: int = 0,
@@ -1296,74 +1786,136 @@ def run_pipeline(
     run_dir = output_base / f"run_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Activar log a archivo dentro del run
+    _add_file_handler(run_dir / "pipeline.log")
+
     tiene_reocr = reocr_dir is not None and reocr_dir.exists()
-    n_pasos = 9 + (1 if tiene_reocr else 0) + (0 if skip_entidades else 1)
+    usa_pages_existentes = pages_dir is not None
+
+    if solo_ocr:
+        n_pasos = 0
+        if not usa_pages_existentes:
+            n_pasos += 1  # YOLO + OCR
+        if tiene_reocr:
+            n_pasos += 1
+    else:
+        n_pasos = 9
+        if not usa_pages_existentes:
+            n_pasos += 1
+        if tiene_reocr:
+            n_pasos += 1
+        if not skip_entidades:
+            n_pasos += 1
+        if not skip_red_personas:
+            n_pasos += 1
     paso = 0
 
-    print(f"{'=' * 60}")
-    print(f"  PIPELINE POST-OCR")
-    print(f"  Run: {run_dir.name}")
-    print(f"  Entrada: {pages_dir}")
-    if tiene_reocr:
-        print(f"  Re-OCR:  {reocr_dir}")
-    if skip_entidades:
-        print(f"  Entidades: DESACTIVADO (--skip-entidades)")
+    logger.info("=" * 60)
+    logger.info("PIPELINE OCR COMPLETO")
+    logger.info(f"Run: {run_dir.name}")
+    logger.info(f"Log: {run_dir / 'pipeline.log'}")
+    if usa_pages_existentes:
+        logger.info(f"Entrada pages: {pages_dir}")
     else:
-        print(f"  Entidades: {ollama_model} @ {ollama_url}")
-    print(f"{'=' * 60}")
+        logger.info(f"Entrada images: {images_dir}")
+    if tomos_filter:
+        logger.info(f"Tomos: {', '.join(sorted(tomos_filter))}")
+    if tiene_reocr:
+        logger.info(f"Re-OCR: {reocr_dir}")
+    if solo_ocr:
+        logger.info("Modo: --solo-ocr (YOLO + OCR, sin post-proceso)")
+    else:
+        if skip_entidades:
+            logger.info("Entidades: DESACTIVADO (--skip-entidades)")
+        else:
+            logger.info(f"Entidades: {ollama_model} @ {ollama_url}")
+        if skip_red_personas:
+            logger.info("Red personas: DESACTIVADO (--skip-red-personas)")
+    logger.info("=" * 60)
     t_start = time.time()
 
-    # 0. Merge selectivo con re-OCR (si se proporciona)
     effective_pages = pages_dir
+    if effective_pages is None:
+        if images_dir is None:
+            raise ValueError("Debes indicar images_dir o pages_dir")
+        paso += 1
+        logger.info(f"[{paso}/{n_pasos}] Deteccion YOLO + OCR por recortes...")
+        effective_pages = generar_pages_desde_yolo_ocr(
+            images_dir=images_dir,
+            run_dir=run_dir,
+            yolo_model_path=yolo_model_path,
+            tomos_filter=tomos_filter,
+            yolo_conf=yolo_conf,
+            yolo_imgsz=yolo_imgsz,
+            yolo_batch=yolo_batch,
+            ocr_model=ocr_model,
+            ocr_prompt=ocr_prompt,
+            ocr_device=ocr_device,
+            ocr_dtype=ocr_dtype,
+            ocr_max_new_tokens=ocr_max_new_tokens,
+            ocr_max_retries=ocr_max_retries,
+        )
+    elif tomos_filter:
+        paso += 1
+        logger.info(f"[{paso}/{n_pasos}] Filtrando pages por tomo...")
+        effective_pages = filtrar_pages_por_tomo(effective_pages, run_dir, tomos_filter)
+
+    # Merge selectivo con re-OCR (si se proporciona)
     if tiene_reocr:
         paso += 1
-        print(f"\n[{paso}/{n_pasos}] Merge selectivo con re-OCR...")
-        effective_pages = merge_con_reocr(pages_dir, reocr_dir, run_dir)
+        logger.info(f"[{paso}/{n_pasos}] Merge selectivo con re-OCR...")
+        effective_pages = merge_con_reocr(effective_pages, reocr_dir, run_dir)
+
+    # --solo-ocr: parar aqui, solo YOLO + OCR + guardado
+    if solo_ocr:
+        elapsed = time.time() - t_start
+        _log_resumen_run(run_dir, elapsed)
+        return run_dir
 
     # 1. Calidad OCR
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Evaluando calidad OCR...")
+    logger.info(f"[{paso}/{n_pasos}] Evaluando calidad OCR...")
     df_calidad = flaggear_ocr(effective_pages, run_dir)
 
     # 2. Consolidar tomos
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Consolidando tomos (union inteligente)...")
+    logger.info(f"[{paso}/{n_pasos}] Consolidando tomos (union inteligente)...")
     tomos_dir = consolidar_tomos(effective_pages, run_dir)
 
     # 3. Segmentar contratos
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Segmentando contratos...")
+    logger.info(f"[{paso}/{n_pasos}] Segmentando contratos...")
     df_seg = segmentar_tomos(tomos_dir, run_dir)
 
     # 4. Parsear campos
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Parseando campos estructurados...")
+    logger.info(f"[{paso}/{n_pasos}] Parseando campos estructurados...")
     df_parsed = parsear_contratos(df_seg)
 
     # 5. Cruzar flags OCR
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Cruzando flags OCR...")
+    logger.info(f"[{paso}/{n_pasos}] Cruzando flags OCR...")
     df_final = _cruzar_flags_ocr(df_parsed, df_calidad)
 
     # 6. Corregir secuencia id_num
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Corrigiendo secuencia id_num...")
+    logger.info(f"[{paso}/{n_pasos}] Corrigiendo secuencia id_num...")
     df_final = corregir_secuencia_ids(df_final)
 
     # 7. Re-segmentar contratos enterrados
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Re-segmentando contratos enterrados...")
+    logger.info(f"[{paso}/{n_pasos}] Re-segmentando contratos enterrados...")
     df_final = resegmentar_perdidos(df_final)
 
     # 8. Diagnosticar paginas para re-OCR
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Diagnosticando paginas con contratos perdidos...")
+    logger.info(f"[{paso}/{n_pasos}] Diagnosticando paginas con contratos perdidos...")
     diagnosticar_paginas_reocr(df_final, effective_pages, run_dir)
 
-    # 8. Extraer entidades (opcional)
+    # 9. Extraer entidades (opcional)
     if not skip_entidades:
         paso += 1
-        print(f"\n[{paso}/{n_pasos}] Extrayendo entidades (personas, naos, lugares, atributos)...")
+        logger.info(f"[{paso}/{n_pasos}] Extrayendo entidades (personas, naos, lugares, atributos)...")
         df_final = extraer_entidades(df_final, run_dir, ollama_url, ollama_model, max_entidades)
 
     out_path = run_dir / "compilado.xlsx"
@@ -1371,7 +1923,7 @@ def run_pipeline(
 
     # 10. Panelizar
     paso += 1
-    print(f"\n[{paso}/{n_pasos}] Panelizando compilado...")
+    logger.info(f"[{paso}/{n_pasos}] Panelizando compilado...")
     df_panel_src, df_headers = separar_headers(df_final)
     df_panel = panelizar(df_panel_src)
     panel_path = run_dir / "panel.xlsx"
@@ -1386,13 +1938,26 @@ def run_pipeline(
     n_personas = counts.get("personas", 0)
     n_naos = counts.get("naos", 0)
     n_lugares = counts.get("lugares", 0)
-    print(f"  {len(df_panel):,} filas: {n_personas:,} personas, {n_naos:,} naos, {n_lugares:,} lugares")
+    logger.info(f"{len(df_panel):,} filas: {n_personas:,} personas, {n_naos:,} naos, {n_lugares:,} lugares")
+
+    # 11. Red de personas
+    if not skip_red_personas:
+        paso += 1
+        logger.info(f"[{paso}/{n_pasos}] Construyendo red de personas...")
+        G, stats = construir_red(df_final)
+        exportar_red_personas(G, stats, run_dir)
+        logger.info(f"{stats['nodos']:,} nodos, {stats['aristas']:,} aristas")
 
     elapsed = time.time() - t_start
-    print(f"\n{'=' * 60}")
-    print(f"  PIPELINE COMPLETADO en {elapsed / 60:.1f} min")
-    print(f"  Directorio: {run_dir}")
-    print(f"  Archivos:")
+    _log_resumen_run(run_dir, elapsed)
+    return run_dir
+
+
+def _log_resumen_run(run_dir: Path, elapsed: float) -> None:
+    logger.info("=" * 60)
+    logger.info(f"PIPELINE COMPLETADO en {elapsed / 60:.1f} min")
+    logger.info(f"Directorio: {run_dir}")
+    logger.info("Archivos:")
     for f in sorted(run_dir.rglob("*")):
         if f.is_file():
             size = f.stat().st_size
@@ -1400,10 +1965,8 @@ def run_pipeline(
                 label = f"{size / 1024:.0f} KB"
             else:
                 label = f"{size / 1024 / 1024:.1f} MB"
-            print(f"    {f.relative_to(run_dir)} ({label})")
-    print(f"{'=' * 60}")
-
-    return run_dir
+            logger.info(f"  {f.relative_to(run_dir)} ({label})")
+    logger.info("=" * 60)
 
 
 # =====================================================================
@@ -1411,11 +1974,21 @@ def run_pipeline(
 # =====================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pipeline post-OCR completo.")
+    parser = argparse.ArgumentParser(description="Pipeline OCR completo.")
+    parser.add_argument(
+        "--images-dir",
+        default="data/preprocess_v2",
+        help="Directorio con imagenes preprocesadas *_prep.* (default: data/preprocess_v2)",
+    )
     parser.add_argument(
         "--pages-dir",
-        default="outputs/pages",
-        help="Directorio con result.txt por pagina (default: outputs/pages)",
+        default=None,
+        help="Directorio con result.txt por pagina. Si se indica, salta YOLO+OCR y usa pages existentes.",
+    )
+    parser.add_argument(
+        "--tomos",
+        default=None,
+        help='Lista de tomos separada por coma. Ej: "Tomo I,Tomo III,Tomo XVI"',
     )
     parser.add_argument(
         "--output-base",
@@ -1423,9 +1996,74 @@ if __name__ == "__main__":
         help="Directorio base para carpetas de corrida (default: outputs)",
     )
     parser.add_argument(
+        "--solo-ocr",
+        action="store_true",
+        help="Solo ejecutar YOLO + OCR (sin post-proceso). Genera crops/, boxes_manifest.csv, ocr_boxes.csv y pages/.",
+    )
+    parser.add_argument(
         "--skip-entidades",
         action="store_true",
         help="Saltar extraccion de entidades via Ollama",
+    )
+    parser.add_argument(
+        "--skip-red-personas",
+        action="store_true",
+        help="Saltar generacion de red_personas.* al final del pipeline",
+    )
+    parser.add_argument(
+        "--yolo-model",
+        default="yolov8s.pt",
+        help="Path al modelo YOLO para detectar boxes (default: yolov8s.pt)",
+    )
+    parser.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=0.25,
+        help="Confidence threshold de YOLO (default: 0.25)",
+    )
+    parser.add_argument(
+        "--yolo-imgsz",
+        type=int,
+        default=1024,
+        help="Tamano de inferencia YOLO (default: 1024)",
+    )
+    parser.add_argument(
+        "--yolo-batch",
+        type=int,
+        default=4,
+        help="Batch de YOLO sobre paginas (default: 4)",
+    )
+    parser.add_argument(
+        "--ocr-model",
+        default="deepseek-ai/DeepSeek-OCR",
+        help="Modelo DeepSeek OCR para recortes (default: deepseek-ai/DeepSeek-OCR)",
+    )
+    parser.add_argument(
+        "--ocr-prompt",
+        default="<image>\n<|grounding|>Convert the document to markdown.",
+        help="Prompt OCR para los recortes",
+    )
+    parser.add_argument(
+        "--ocr-device",
+        default=None,
+        help="cuda|cpu|mps (default: auto)",
+    )
+    parser.add_argument(
+        "--ocr-dtype",
+        default="bfloat16",
+        help="bfloat16|float16|float32 (default: bfloat16)",
+    )
+    parser.add_argument(
+        "--ocr-max-new-tokens",
+        type=int,
+        default=4096,
+        help="Max tokens por recorte OCR (default: 4096)",
+    )
+    parser.add_argument(
+        "--ocr-max-retries",
+        type=int,
+        default=3,
+        help="Reintentos OCR por recorte (default: 3)",
     )
     parser.add_argument(
         "--ollama-url",
@@ -1450,11 +2088,26 @@ if __name__ == "__main__":
              "Si se indica, el pipeline hace merge selectivo antes de procesar.",
     )
     args = parser.parse_args()
+    tomos_filter = _parse_tomos_arg(args.tomos)
 
     run_pipeline(
-        pages_dir=Path(args.pages_dir),
         output_base=Path(args.output_base),
+        images_dir=Path(args.images_dir) if args.images_dir else None,
+        pages_dir=Path(args.pages_dir) if args.pages_dir else None,
+        tomos_filter=tomos_filter,
+        yolo_model_path=Path(args.yolo_model),
+        yolo_conf=args.yolo_conf,
+        yolo_imgsz=args.yolo_imgsz,
+        yolo_batch=args.yolo_batch,
+        ocr_model=args.ocr_model,
+        ocr_prompt=args.ocr_prompt,
+        ocr_device=args.ocr_device,
+        ocr_dtype=args.ocr_dtype,
+        ocr_max_new_tokens=args.ocr_max_new_tokens,
+        ocr_max_retries=args.ocr_max_retries,
+        solo_ocr=args.solo_ocr,
         skip_entidades=args.skip_entidades,
+        skip_red_personas=args.skip_red_personas,
         ollama_url=args.ollama_url,
         ollama_model=args.ollama_model,
         max_entidades=args.max_entidades,
