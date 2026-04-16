@@ -20,9 +20,8 @@ pip install -r requirements.txt
 | 1b | `src/inferir_yolo_obb.py` | Segmentación visual con YOLO OBB (contratos + continuaciones) |
 | 2 | `src/ocr_model_deepseek.py` | OCR por lotes con DeepSeek-OCR |
 | 3 | `src/pipeline.py` | Orquestador post-OCR: consolidación, segmentación, parseo, corrección de secuencia, diagnóstico y extracción de entidades |
-| 4 | `src/reocr_perdidos.py` | Re-OCR focalizado de páginas con contratos perdidos |
-| 5 | `src/panelizar.py` | Conversión a formato panel largo (una fila por entidad) |
-| 6 | `src/red_personas.py` | Red de co-ocurrencia de personas (se ejecuta automáticamente al final de `src/pipeline.py`; también puede correrse aparte) |
+| 4 | `src/panelizar.py` | Conversión a formato panel largo (una fila por entidad) |
+| 5 | `src/red_personas.py` | Red de co-ocurrencia de personas (se ejecuta automáticamente al final de `src/pipeline.py`; también puede correrse aparte) |
 
 Módulos auxiliares:
 - `src/parseo_compilado.py` — parser de campos estructurados, importado por `pipeline.py`
@@ -48,18 +47,12 @@ py src/ocr_model_deepseek.py --images-dir data/preprocess_v2 --glob "Tomo*_prep.
 # 3. Pipeline post-OCR completo
 py src/pipeline.py                                          # con entidades
 py src/pipeline.py --skip-entidades                         # sin entidades
-py src/pipeline.py --reocr-dir outputs/run_XXX/reocr        # con merge de re-OCR previo
 py src/pipeline.py --skip-red-personas                      # sin exportar red_personas.*
 
-# 4. Re-OCR focalizado
-py src/reocr_perdidos.py --diagnostico outputs/run_XXX/diagnostico_reocr.xlsx \
-   --images-dir data/preprocess_v2 --original-pages outputs/pages \
-   --output-dir outputs/run_XXX/reocr
-
-# 5. Panelizar
+# 4. Panelizar
 py src/panelizar.py --compilado outputs/run_XXX/compilado.xlsx
 
-# 6. Red de personas (opcional; el pipeline principal ya la genera)
+# 5. Red de personas (opcional; el pipeline principal ya la genera)
 py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ```
 
@@ -67,12 +60,10 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 
 ```
 outputs/run_YYYYMMDD_HHMMSS/
-├── pages_merged/            (si --reocr-dir)
 ├── calidad_ocr.csv
 ├── tomos_txt/*.txt          (16 tomos consolidados)
 ├── contratos_segmentados.xlsx
 ├── compilado.xlsx           (dataset final con entidades)
-├── diagnostico_reocr.xlsx
 ├── panel.xlsx               (formato largo)
 ├── red_personas.gexf        (red para Gephi)
 ├── red_personas_nodos.csv

@@ -80,8 +80,6 @@ def _ensure_dirs(output_dir: Path):
     return pages_dir
 
 # ---------- validación de output OCR ----------
-_RE_TAG = re.compile(r"<\|[^|]*\|>")
-_RE_COORDS = re.compile(r"\[\[\d[\d,\s]*\]\]")
 _RE_NO_LATINO = re.compile(
     r"[\u0900-\u097F\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
 )
@@ -98,12 +96,6 @@ def _validar_output(text: str) -> Tuple[bool, List[str]]:
         return False, ["vacio"]
 
     stripped = text.strip()
-
-    # Solo tags de grounding sin texto real
-    clean = _RE_TAG.sub("", stripped)
-    clean = _RE_COORDS.sub("", clean).strip()
-    if len(clean) < 20:
-        flags.append("solo_tags")
 
     # Muy corto
     if len(stripped) < 50:
@@ -128,7 +120,7 @@ def _validar_output(text: str) -> Tuple[bool, List[str]]:
         flags.append("chars_no_latino")
 
     # Flags que invalidan el output (chars_no_latino es warning, no invalida)
-    invalida = {"vacio", "solo_tags", "bajo_alfa", "texto_repetitivo"}
+    invalida = {"vacio", "bajo_alfa", "texto_repetitivo"}
     es_valido = not bool(invalida & set(flags))
     return es_valido, flags
 
@@ -136,8 +128,7 @@ def _validar_output(text: str) -> Tuple[bool, List[str]]:
 # ---------- prompts de retry ----------
 _PROMPTS_RETRY = [
     "<image>\nOCR this document to plain text.",
-    "<image>\nThis is a page from a 16th century Spanish notarial catalog. "
-    "Each entry starts with a number followed by 'Libro del año'. "
+    "<image>\nThis is a section from a 16th century Spanish notarial catalog. "
     "Convert all text to markdown.",
 ]
 

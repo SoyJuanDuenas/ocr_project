@@ -36,16 +36,12 @@ py src/pipeline.py --pages-dir outputs/pages            # desde pages existentes
 py src/pipeline.py --skip-entidades                     # sin entidades
 py src/pipeline.py --skip-red-personas                  # sin red de personas
 py src/pipeline.py --tomos "Tomo I,Tomo III"            # filtrar tomos
-py src/pipeline.py --reocr-dir outputs/run_XXX/reocr    # con merge de re-OCR
 py src/pipeline.py --yolo-model yolov8s-obb.pt --yolo-conf 0.3  # configurar YOLO
 
-# 4. Re-OCR focalizado (paginas con contratos perdidos)
-py src/reocr_perdidos.py --diagnostico outputs/run_XXX/diagnostico_reocr.xlsx --images-dir data/preprocess_v2 --original-pages outputs/pages --output-dir outputs/run_XXX/reocr
-
-# 5. Panelizar compilado (standalone)
+# 4. Panelizar compilado (standalone)
 py src/panelizar.py --compilado outputs/run_XXX/compilado.xlsx
 
-# 6. Red de co-ocurrencia de personas (standalone)
+# 5. Red de co-ocurrencia de personas (standalone)
 py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 ```
 
@@ -59,9 +55,8 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
 
 2. **`src/ocr_model_deepseek.py`** — Batch OCR using DeepSeek-OCR (HuggingFace Transformers). Produces per-page text in `outputs/pages/<tomo>_p<NNNN>/result.txt`. Auto-detects device, retry logic (3 retries with alternate prompts), resume support. Validates output with quality flags: `vacio`, `solo_tags`, `muy_corto`, `bajo_alfa`, `texto_repetitivo`.
 
-3. **`src/pipeline.py`** — Main orchestrator (YOLO + OCR + post-processing, up to 12 steps):
+3. **`src/pipeline.py`** — Main orchestrator (YOLO + OCR + post-processing, up to 10 steps):
    - **Step 0** (if `--images-dir`, no `--pages-dir`): YOLO detection (`ultralytics`) → crop boxes → DeepSeek-OCR per crop → recompose `result.txt` per page
-   - **Step 0b** (if `--reocr-dir`): Merge selectivo con re-OCR (usa re-OCR si new_lines > lost_lines AND < 30KB)
    - **Step 1**: Calidad OCR (flags por pagina)
    - **Step 2**: Limpieza de paginas (drop angle brackets, headers "Catálogo de los Fondos Americanos" via Levenshtein, dedup lineas consecutivas) + consolidacion de tomos (union inteligente con heuristica de saltos de linea)
    - **Step 3**: Segmentacion de contratos (fuzzy "Libro del año" via Levenshtein ≤ 3)
@@ -69,18 +64,15 @@ py src/red_personas.py --compilado outputs/run_XXX/compilado.xlsx
    - **Step 5**: Cruce de flags OCR a nivel contrato
    - **Step 6**: Correccion de secuencia id_num (anclas + relleno + diagnostico)
    - **Step 7**: Re-segmentacion de contratos "enterrados" en el texto de otros
-   - **Step 8**: Diagnostico de paginas para re-OCR
-   - **Step 9**: Extraccion de entidades via Ollama (opcional, `--skip-entidades` para saltar). Incluye `atributos` por persona.
-   - **Step 10**: Panelizar (integrado, genera panel.xlsx + panel_headers.xlsx + panel_por_tipo.xlsx)
-   - **Step 11**: Red de personas (integrado, opcional `--skip-red-personas`)
+   - **Step 8**: Extraccion de entidades via Ollama (opcional, `--skip-entidades` para saltar). Incluye `atributos` por persona.
+   - **Step 9**: Panelizar (integrado, genera panel.xlsx + panel_headers.xlsx + panel_por_tipo.xlsx)
+   - **Step 10**: Red de personas (integrado, opcional `--skip-red-personas`)
 
 4. **`src/parseo_compilado.py`** — Módulo de parseo importado por pipeline.py. Extrae campos: macrodatos, año, oficio, libro, escribania, folio, fecha, signatura, asunto, observaciones.
 
-5. **`src/reocr_perdidos.py`** — Re-OCR focalizado. Lee diagnostico_reocr.xlsx, re-procesa paginas con `crop_mode=False`, compara y exporta resultados. Soporta resume.
+5. **`src/panelizar.py`** — Convierte compilado.xlsx a formato panel largo (una fila por mencion de entidad). Genera IDs compuestos: IDTOMO (2 dígitos) + IDCONT (4 dígitos) + IDPER/NAO/LUG (2 dígitos).
 
-6. **`src/panelizar.py`** — Convierte compilado.xlsx a formato panel largo (una fila por mencion de entidad). Genera IDs compuestos: IDTOMO (2 dígitos) + IDCONT (4 dígitos) + IDPER/NAO/LUG (2 dígitos).
-
-7. **`src/red_personas.py`** — Construye red de co-ocurrencia de personas. Exporta GEXF (Gephi), CSVs de nodos/aristas, y estadisticas.
+6. **`src/red_personas.py`** — Construye red de co-ocurrencia de personas. Exporta GEXF (Gephi), CSVs de nodos/aristas, y estadisticas.
 
 ### Data Flow
 
@@ -104,13 +96,11 @@ data/preprocess_v2/*_prep.png
       ├── boxes_manifest.csv       (manifest de boxes detectados)
       ├── ocr_boxes.csv            (OCR tabular por box)
       ├── pages/                   (result.txt recompuesto por pagina)
-      ├── pages_merged/            (si --reocr-dir)
       ├── pages_filtered/          (si --tomos)
       ├── calidad_ocr.csv
       ├── tomos_txt/*.txt          (tomos consolidados)
       ├── contratos_segmentados.xlsx
       ├── compilado.xlsx           (dataset final con entidades + atributos)
-      ├── diagnostico_reocr.xlsx
       ├── panel.xlsx               (formato largo)
       ├── panel_headers.xlsx       (filas header separadas)
       ├── panel_por_tipo.xlsx      (multi-hoja por tipo entidad)

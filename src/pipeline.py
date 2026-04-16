@@ -463,15 +463,18 @@ def ocr_boxes_a_paginas(
             tmp_dir,
             max_retries,
         )
+        text_clean = limpiar_ocr_text(text)
         rows_out.append({
             **row,
             "ocr_text": text,
+            "ocr_text_clean": text_clean,
             "ocr_chars": len(text),
+            "ocr_chars_clean": len(text_clean),
             "ocr_status": ocr_status,
             "ocr_flags": ocr_flags,
         })
-        if text:
-            page_chunks[row["page_label"]].append((int(row["sort_idx"]), text))
+        if text_clean:
+            page_chunks[row["page_label"]].append((int(row["sort_idx"]), text_clean))
 
         if count % 100 == 0 or count == total:
             elapsed = time.time() - t0
@@ -537,6 +540,48 @@ def generar_pages_desde_yolo_ocr(
     )
 
 
+def limpiar_ocr_boxes(run_dir: Path) -> Path:
+    """Aplica limpieza de texto sobre ocr_boxes.csv existente y regenera pages.
+
+    Lee ocr_boxes.csv, agrega/actualiza columna ocr_text_clean,
+    reescribe ocr_boxes.csv y regenera result.txt por pagina con texto limpio.
+    """
+    ocr_path = run_dir / "ocr_boxes.csv"
+    if not ocr_path.exists():
+        raise FileNotFoundError(f"No existe {ocr_path}")
+
+    df = pd.read_csv(ocr_path, encoding="utf-8-sig")
+    logger.info(f"Leyendo {len(df):,} boxes de {ocr_path}")
+
+    df["ocr_text_clean"] = df["ocr_text"].fillna("").apply(limpiar_ocr_text)
+    df["ocr_chars_clean"] = df["ocr_text_clean"].str.len()
+
+    df.to_csv(ocr_path, index=False, encoding="utf-8-sig")
+    logger.info(f"ocr_text_clean agregado a {ocr_path}")
+
+    # Regenerar pages con texto limpio
+    pages_dir = run_dir / "pages"
+    pages_dir.mkdir(exist_ok=True)
+
+    page_chunks: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for _, row in df.iterrows():
+        text = row.get("ocr_text_clean", "")
+        if pd.notna(text) and str(text).strip() and pd.notna(row.get("page_label")) and pd.notna(row.get("sort_idx")):
+            page_chunks[str(row["page_label"])].append((int(row["sort_idx"]), str(text)))
+
+    n_pages = 0
+    for page_label, chunks in page_chunks.items():
+        page_dir = pages_dir / page_label
+        page_dir.mkdir(exist_ok=True)
+        chunks.sort(key=lambda x: x[0])
+        page_text = "\n".join(t for _, t in chunks if t.strip())
+        (page_dir / "result.txt").write_text(page_text, encoding="utf-8")
+        n_pages += 1
+
+    logger.info(f"{n_pages:,} paginas regeneradas en {pages_dir}")
+    return pages_dir
+
+
 # =====================================================================
 # 1. FLAGGEO DE CALIDAD OCR
 # =====================================================================
@@ -544,7 +589,6 @@ def generar_pages_desde_yolo_ocr(
 RE_NO_LATINO = re.compile(
     r"[\u0900-\u097F\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
 )
-RE_ARTEFACTO = re.compile(r"<\|(?:ref|det|/ref|/det)\|>")
 
 
 def _evaluar_calidad(texto: str) -> dict:
@@ -554,7 +598,6 @@ def _evaluar_calidad(texto: str) -> dict:
             "ratio_alfa": 0.0,
             "chars_no_latino": 0,
             "lineas_repetidas": 0,
-            "ratio_artefactos": 0.0,
         }
 
     largo = len(texto)
@@ -565,15 +608,11 @@ def _evaluar_calidad(texto: str) -> dict:
     counter = Counter(lineas)
     lineas_repetidas = sum(v - 1 for v in counter.values() if v > 1)
 
-    lineas_artefacto = sum(1 for l in lineas if RE_ARTEFACTO.search(l))
-    ratio_artefactos = lineas_artefacto / len(lineas) if lineas else 0
-
     return {
         "largo": largo,
         "ratio_alfa": round(ratio_alfa, 3),
         "chars_no_latino": chars_no_latino,
         "lineas_repetidas": lineas_repetidas,
-        "ratio_artefactos": round(ratio_artefactos, 3),
     }
 
 
@@ -608,8 +647,6 @@ def flaggear_ocr(pages_dir: Path, run_dir: Path) -> pd.DataFrame:
             flags.append("script_no_latino")
         if row["lineas_repetidas"] > 5:
             flags.append("texto_repetitivo")
-        if row["ratio_artefactos"] > 0.3:
-            flags.append("artefactos")
         med = medianas.get(row["tomo"], 1)
         if med > 0:
             r = row["largo"] / med
@@ -645,8 +682,49 @@ def flaggear_ocr(pages_dir: Path, run_dir: Path) -> pd.DataFrame:
 # =====================================================================
 
 
-def _drop_angle_brackets(text: str) -> str:
-    return "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("<"))
+_RE_GROUNDING_LINE = re.compile(
+    r"^\s*<\|ref\|>.*?<\|/det\|>\s*$", re.MULTILINE
+)
+_RE_GROUNDING_TAG = re.compile(r"<\|/?(?:ref|det)\|>")
+_RE_COORDS = re.compile(r"\[\[\d[\d,\s]*\]\]")
+_RE_MD_HEADER = re.compile(r"^#{1,3}\s+", re.MULTILINE)
+_RE_DEHYPHEN = re.compile(r"(\w)-\s*\n\s*(\w)")
+_RE_BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def _strip_grounding(texto: str) -> str:
+    """Elimina tags de grounding y coordenadas del output OCR."""
+    texto = _RE_GROUNDING_LINE.sub("", texto)
+    texto = _RE_GROUNDING_TAG.sub("", texto)
+    texto = _RE_COORDS.sub("", texto)
+    texto = _RE_MD_HEADER.sub("", texto)
+    return texto
+
+
+def _dehyphenate_lines(texto: str) -> str:
+    """Une palabras partidas por guion al final de linea dentro de un texto."""
+    return _RE_DEHYPHEN.sub(r"\1\2", texto)
+
+
+def _join_lines(texto: str) -> str:
+    """Une todos los saltos de linea en texto continuo.
+
+    YOLO ya segmenta por contrato, asi que dentro de un crop no hay
+    separaciones de parrafo reales — todo blank line es artefacto del OCR.
+    """
+    parts = [line.strip() for line in texto.split("\n") if line.strip()]
+    return " ".join(parts)
+
+
+def limpiar_ocr_text(texto: str) -> str:
+    """Limpieza completa de texto OCR: tags, guiones, saltos de linea."""
+    if not texto or not texto.strip():
+        return ""
+    texto = _strip_grounding(texto)
+    texto = _dehyphenate_lines(texto)
+    texto = _join_lines(texto)
+    texto = _RE_BLANK_LINES.sub("\n\n", texto)
+    return texto.strip()
 
 
 def _norm_catalogo(s: str) -> str:
@@ -696,7 +774,8 @@ def _dedup_lineas_consecutivas(texto: str) -> str:
 
 
 def _limpiar_pagina(texto: str) -> str:
-    texto = _drop_angle_brackets(texto)
+    texto = _strip_grounding(texto)
+    texto = _dehyphenate_lines(texto)
     texto = _drop_catalogo(texto)
     texto = _dedup_lineas_consecutivas(texto)
     return texto
@@ -1289,187 +1368,6 @@ def resegmentar_perdidos(df: pd.DataFrame) -> pd.DataFrame:
 # =====================================================================
 
 
-def _normalizar_busqueda(texto: str) -> str:
-    """Normaliza texto para busqueda fuzzy: minusculas, sin acentos, sin espacios extra."""
-    import unicodedata as ud
-    texto = ud.normalize("NFD", texto)
-    texto = "".join(c for c in texto if not ud.combining(c))
-    texto = texto.lower()
-    texto = re.sub(r"\s+", " ", texto)
-    return texto
-
-
-def diagnosticar_paginas_reocr(
-    df: pd.DataFrame,
-    pages_dir: Path,
-    run_dir: Path,
-) -> pd.DataFrame:
-    """Identifica paginas que necesitan re-OCR por contratos perdidos.
-
-    Mapea contratos-ancla a paginas fisicas, luego para cada gap
-    identifica el rango de paginas candidatas para re-OCR.
-    """
-    # Cargar todas las paginas por tomo
-    page_files = sorted(pages_dir.rglob("result.txt"))
-    paginas_por_tomo: dict[str, list[dict]] = defaultdict(list)
-
-    for path in page_files:
-        meta = _parse_tomo_page(path)
-        if meta["tomo"]:
-            texto = _read_text(path)
-            texto_limpio = _limpiar_pagina(texto)
-            paginas_por_tomo[meta["tomo"]].append({
-                "page_num": meta["page_num"],
-                "texto_norm": _normalizar_busqueda(texto_limpio),
-            })
-
-    for tomo in paginas_por_tomo:
-        paginas_por_tomo[tomo].sort(key=lambda x: x["page_num"])
-
-    # Para cada tomo, encontrar gaps y mapear a paginas
-    resultados: list[dict] = []
-
-    for tomo in sorted(df["tomo_id"].unique()):
-        # Convertir tomo_id ("Tomo_I") a nombre de pagina ("Tomo I")
-        tomo_nombre = tomo.replace("_", " ")
-        paginas = paginas_por_tomo.get(tomo_nombre, [])
-        if not paginas:
-            continue
-
-        t = df[df["tomo_id"] == tomo].copy()
-        indices = t.index.tolist()
-        n = len(indices)
-
-        # Reconstruir anclas (misma logica que corregir_secuencia_ids)
-        anclas = []
-        for pos in range(n):
-            idx = indices[pos]
-            val = t.at[idx, "id_num_original"] if "id_num_original" in t.columns else t.at[idx, "id_num"]
-            if pd.notna(val):
-                val_int = int(val)
-                if not anclas:
-                    anclas.append((pos, idx, val_int))
-                else:
-                    _, _, prev_val = anclas[-1]
-                    if val_int > prev_val and (val_int - prev_val) < 100:
-                        anclas.append((pos, idx, val_int))
-
-        # Funcion para buscar en que pagina esta un contrato
-        def _buscar_pagina(df_idx: int, hint_start: int = 0) -> int | None:
-            asunto = str(t.at[df_idx, "asunto"]) if pd.notna(t.at[df_idx, "asunto"]) else ""
-            if len(asunto) < 15:
-                # Usar texto_completo si asunto es muy corto
-                asunto = str(t.at[df_idx, "texto_completo"]) if pd.notna(t.at[df_idx, "texto_completo"]) else ""
-            if len(asunto) < 15:
-                return None
-
-            # Tomar fragmento distintivo (50-80 chars del asunto)
-            key = _normalizar_busqueda(asunto[:80])
-            if len(key) < 10:
-                return None
-
-            # Buscar desde hint hacia adelante
-            for pi in range(max(0, hint_start - 2), len(paginas)):
-                if key[:40] in paginas[pi]["texto_norm"]:
-                    return paginas[pi]["page_num"]
-            # Buscar hacia atras si no se encontro
-            for pi in range(min(hint_start, len(paginas)) - 1, -1, -1):
-                if key[:40] in paginas[pi]["texto_norm"]:
-                    return paginas[pi]["page_num"]
-            return None
-
-        # Para cada par de anclas con gap > nulls, mapear a paginas
-        hint = 0
-        for k in range(len(anclas) - 1):
-            pos_a, idx_a, id_a = anclas[k]
-            pos_b, idx_b, id_b = anclas[k + 1]
-            gap = id_b - id_a - 1
-
-            # Contar fillables
-            fillable_count = 0
-            for pos in range(pos_a + 1, pos_b):
-                idx = indices[pos]
-                orig = t.at[idx, "id_num_original"] if "id_num_original" in t.columns else t.at[idx, "id_num"]
-                if pd.isna(orig):
-                    fillable_count += 1
-                else:
-                    val_int = int(orig)
-                    if not (val_int > id_a and val_int < id_b and (val_int - id_a) < 100):
-                        fillable_count += 1  # sospechoso
-
-            perdidos = gap - fillable_count
-            if perdidos <= 0:
-                continue
-
-            # Buscar paginas de los contratos vecinos
-            page_antes = _buscar_pagina(idx_a, hint)
-            page_despues = _buscar_pagina(idx_b, hint)
-
-            if page_antes is not None:
-                hint = next(
-                    (pi for pi, p in enumerate(paginas) if p["page_num"] == page_antes), hint
-                )
-
-            # Rango de paginas candidatas (incluyendo +-1 por contratos entre paginas)
-            if page_antes is not None and page_despues is not None:
-                p_min = max(1, page_antes - 1)
-                p_max = page_despues + 1
-                paginas_reocr = list(range(p_min, p_max + 1))
-            elif page_antes is not None:
-                paginas_reocr = list(range(max(1, page_antes - 1), page_antes + 3))
-            elif page_despues is not None:
-                paginas_reocr = list(range(max(1, page_despues - 2), page_despues + 1))
-            else:
-                paginas_reocr = []
-
-            # IDs perdidos
-            ids_perdidos = list(range(id_a + fillable_count + 1, id_b))
-
-            for lost_id in ids_perdidos:
-                resultados.append({
-                    "tomo_id": tomo,
-                    "id_perdido": lost_id,
-                    "id_ancla_antes": id_a,
-                    "id_ancla_despues": id_b,
-                    "perdidos_en_gap": perdidos,
-                    "pagina_ancla_antes": page_antes,
-                    "pagina_ancla_despues": page_despues,
-                    "paginas_reocr": "; ".join(str(p) for p in paginas_reocr),
-                })
-
-    df_diag = pd.DataFrame(resultados)
-
-    if len(df_diag) > 0:
-        # Resumen de paginas unicas a re-OCR por tomo
-        resumen: list[dict] = []
-        for tomo in df_diag["tomo_id"].unique():
-            sub = df_diag[df_diag["tomo_id"] == tomo]
-            all_pages = set()
-            for pages_str in sub["paginas_reocr"]:
-                for p in str(pages_str).split("; "):
-                    if p.strip().isdigit():
-                        all_pages.add(int(p.strip()))
-            resumen.append({
-                "tomo_id": tomo,
-                "contratos_perdidos": len(sub),
-                "paginas_a_reocr": len(all_pages),
-                "lista_paginas": "; ".join(str(p) for p in sorted(all_pages)),
-            })
-        df_resumen = pd.DataFrame(resumen)
-
-        # Exportar
-        diag_path = run_dir / "diagnostico_reocr.xlsx"
-        with pd.ExcelWriter(diag_path, engine="openpyxl") as writer:
-            df_resumen.to_excel(writer, sheet_name="resumen_por_tomo", index=False)
-            df_diag.to_excel(writer, sheet_name="contratos_perdidos", index=False)
-
-        n_pages = sum(r["paginas_a_reocr"] for r in resumen)
-        logger.info(f"{len(df_diag):,} contratos perdidos en {n_pages} paginas candidatas")
-        logger.info(f"Diagnostico exportado: {diag_path}")
-    else:
-        logger.info("Sin contratos perdidos detectados")
-
-    return df_diag
 
 
 # =====================================================================
@@ -1650,83 +1548,6 @@ def extraer_entidades(
 # =====================================================================
 
 
-def merge_con_reocr(
-    pages_dir: Path,
-    reocr_dir: Path,
-    run_dir: Path,
-) -> Path:
-    """Crea directorio merged dentro del run: usa re-OCR donde es mejor.
-
-    Criterio: se usa la version re-OCR de una pagina cuando tiene mas
-    lineas nuevas que perdidas respecto al original Y no es garbage loop.
-
-    Para las demas paginas, se usa un symlink/copia del original.
-    Retorna el path al directorio merged (que reemplaza a pages_dir
-    para el resto del pipeline).
-    """
-    import shutil
-
-    merged_dir = run_dir / "pages_merged"
-    merged_dir.mkdir(exist_ok=True)
-
-    reocr_pages_dir = reocr_dir / "pages"
-    if not reocr_pages_dir.exists():
-        logger.warning(f"No existe {reocr_pages_dir}, usando originales")
-        return pages_dir
-
-    # Comparar original vs re-OCR para cada pagina con re-OCR disponible
-    reocr_results = sorted(reocr_pages_dir.rglob("result.txt"))
-    reocr_labels = {r.parent.name: r for r in reocr_results}
-
-    usadas_reocr = 0
-    usadas_original = 0
-    garbage = 0
-
-    # Iterar todas las paginas originales
-    for orig_page_dir in sorted(pages_dir.iterdir()):
-        if not orig_page_dir.is_dir():
-            continue
-        label = orig_page_dir.name
-        orig_result = orig_page_dir / "result.txt"
-        if not orig_result.exists():
-            continue
-
-        dest_dir = merged_dir / label
-        dest_dir.mkdir(exist_ok=True)
-        dest_result = dest_dir / "result.txt"
-
-        if label in reocr_labels:
-            reocr_result = reocr_labels[label]
-            orig_text = _read_text(orig_result)
-            reocr_text = _read_text(reocr_result)
-
-            # Detectar garbage (>30KB = loop repetitivo)
-            if len(reocr_text) > 30000:
-                shutil.copy2(orig_result, dest_result)
-                usadas_original += 1
-                garbage += 1
-                continue
-
-            # Comparar por lineas
-            orig_lines = set(l.strip() for l in orig_text.split("\n") if l.strip())
-            reocr_lines = set(l.strip() for l in reocr_text.split("\n") if l.strip())
-            nuevas = len(reocr_lines - orig_lines)
-            perdidas = len(orig_lines - reocr_lines)
-
-            if nuevas > perdidas:
-                shutil.copy2(reocr_result, dest_result)
-                usadas_reocr += 1
-            else:
-                shutil.copy2(orig_result, dest_result)
-                usadas_original += 1
-        else:
-            shutil.copy2(orig_result, dest_result)
-            usadas_original += 1
-
-    total = usadas_reocr + usadas_original
-    logger.info(f"{total:,} paginas merged: {usadas_reocr} re-OCR, "
-               f"{usadas_original} original ({garbage} garbage descartados)")
-    return merged_dir
 
 
 def filtrar_pages_por_tomo(pages_dir: Path, run_dir: Path, tomos_filter: set[str]) -> Path:
@@ -1779,7 +1600,6 @@ def run_pipeline(
     ollama_url: str = "http://localhost:11434/api/generate",
     ollama_model: str = "qwen3.5:9b",
     max_entidades: int = 0,
-    reocr_dir: Path | None = None,
 ) -> Path:
     # Crear directorio de corrida
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1789,20 +1609,15 @@ def run_pipeline(
     # Activar log a archivo dentro del run
     _add_file_handler(run_dir / "pipeline.log")
 
-    tiene_reocr = reocr_dir is not None and reocr_dir.exists()
     usa_pages_existentes = pages_dir is not None
 
     if solo_ocr:
         n_pasos = 0
         if not usa_pages_existentes:
             n_pasos += 1  # YOLO + OCR
-        if tiene_reocr:
-            n_pasos += 1
     else:
-        n_pasos = 9
+        n_pasos = 8
         if not usa_pages_existentes:
-            n_pasos += 1
-        if tiene_reocr:
             n_pasos += 1
         if not skip_entidades:
             n_pasos += 1
@@ -1820,8 +1635,6 @@ def run_pipeline(
         logger.info(f"Entrada images: {images_dir}")
     if tomos_filter:
         logger.info(f"Tomos: {', '.join(sorted(tomos_filter))}")
-    if tiene_reocr:
-        logger.info(f"Re-OCR: {reocr_dir}")
     if solo_ocr:
         logger.info("Modo: --solo-ocr (YOLO + OCR, sin post-proceso)")
     else:
@@ -1859,12 +1672,6 @@ def run_pipeline(
         paso += 1
         logger.info(f"[{paso}/{n_pasos}] Filtrando pages por tomo...")
         effective_pages = filtrar_pages_por_tomo(effective_pages, run_dir, tomos_filter)
-
-    # Merge selectivo con re-OCR (si se proporciona)
-    if tiene_reocr:
-        paso += 1
-        logger.info(f"[{paso}/{n_pasos}] Merge selectivo con re-OCR...")
-        effective_pages = merge_con_reocr(effective_pages, reocr_dir, run_dir)
 
     # --solo-ocr: parar aqui, solo YOLO + OCR + guardado
     if solo_ocr:
@@ -1907,12 +1714,7 @@ def run_pipeline(
     logger.info(f"[{paso}/{n_pasos}] Re-segmentando contratos enterrados...")
     df_final = resegmentar_perdidos(df_final)
 
-    # 8. Diagnosticar paginas para re-OCR
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Diagnosticando paginas con contratos perdidos...")
-    diagnosticar_paginas_reocr(df_final, effective_pages, run_dir)
-
-    # 9. Extraer entidades (opcional)
+    # 8. Extraer entidades (opcional)
     if not skip_entidades:
         paso += 1
         logger.info(f"[{paso}/{n_pasos}] Extrayendo entidades (personas, naos, lugares, atributos)...")
@@ -2082,12 +1884,26 @@ if __name__ == "__main__":
         help="Limitar extraccion a los primeros N contratos (0 = todos)",
     )
     parser.add_argument(
-        "--reocr-dir",
+        "--limpiar-ocr",
         default=None,
-        help="Directorio con resultado de re-OCR (contiene pages/). "
-             "Si se indica, el pipeline hace merge selectivo antes de procesar.",
+        help="Path a un run existente (ej: outputs/run_XXX). "
+             "Aplica limpieza de tags/guiones sobre ocr_boxes.csv y regenera pages/.",
     )
     args = parser.parse_args()
+
+    if args.limpiar_ocr:
+        run_dir = Path(args.limpiar_ocr)
+        if not run_dir.exists():
+            parser.error(f"No existe el directorio: {run_dir}")
+        _add_file_handler(run_dir / "pipeline.log")
+        logger.info("=" * 60)
+        logger.info("LIMPIEZA OCR")
+        logger.info(f"Run: {run_dir}")
+        logger.info("=" * 60)
+        limpiar_ocr_boxes(run_dir)
+        logger.info("Limpieza completada.")
+        sys.exit(0)
+
     tomos_filter = _parse_tomos_arg(args.tomos)
 
     run_pipeline(
@@ -2111,5 +1927,4 @@ if __name__ == "__main__":
         ollama_url=args.ollama_url,
         ollama_model=args.ollama_model,
         max_entidades=args.max_entidades,
-        reocr_dir=Path(args.reocr_dir) if args.reocr_dir else None,
     )
