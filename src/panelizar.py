@@ -19,10 +19,10 @@ import pandas as pd
 
 # Columnas del contrato que se conservan en el panel
 COLS_CONTRATO = [
-    "tomo_id", "id_num", "id_num_original", "id_status",
+    "tomo_id", "id_num", "id_num_original", "id_status", "tipo",
     "macrodatos", "año", "año_num", "oficio", "libro",
     "escribania", "folio", "fecha", "signatura",
-    "asunto", "observaciones", "n_subregistros",
+    "asunto", "observaciones",
     "ocr_flag", "ocr_flagged",
 ]
 
@@ -36,16 +36,45 @@ def _split_entidades(valor: str) -> list[str]:
     return [e.strip() for e in valor.split(";") if e.strip()]
 
 
-def _parse_atributos(valor: str) -> dict[str, str]:
-    """Parsea string 'nombre::desc || nombre::desc' a dict."""
+_ATTR_FIELDS = ("gentilicio", "vecindad", "ocupacion", "relacion")
+_EMPTY_ATTR = {k: "" for k in _ATTR_FIELDS}
+
+
+def _parse_atributos(valor: str) -> dict[str, dict[str, str]]:
+    """Parsea atributos JSON estructurados a dict[persona, {campo: valor}].
+
+    Soporta tanto el formato nuevo (JSON con subcampos) como el legacy
+    (string 'nombre::desc || nombre::desc').
+    """
     if not isinstance(valor, str) or not valor.strip():
         return {}
+    # Intentar JSON estructurado
+    try:
+        import json
+        parsed = json.loads(valor)
+        if isinstance(parsed, dict):
+            result = {}
+            for nombre, attrs in parsed.items():
+                if isinstance(attrs, dict):
+                    # "oficio" en JSON del SLM → "ocupacion" en panel
+                    mapped = {k: str(attrs.get(k, "")).strip() for k in _ATTR_FIELDS}
+                    if not mapped.get("ocupacion") and attrs.get("oficio"):
+                        mapped["ocupacion"] = str(attrs["oficio"]).strip()
+                    result[nombre] = mapped
+                elif isinstance(attrs, str):
+                    result[nombre] = {**_EMPTY_ATTR, "relacion": attrs.strip()}
+                else:
+                    result[nombre] = dict(_EMPTY_ATTR)
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fallback: formato legacy 'nombre::desc || nombre::desc'
     result = {}
     for par in valor.split("||"):
         par = par.strip()
         if "::" in par:
             nombre, desc = par.split("::", 1)
-            result[nombre.strip()] = desc.strip()
+            result[nombre.strip()] = {**_EMPTY_ATTR, "relacion": desc.strip()}
     return result
 
 
@@ -152,12 +181,19 @@ def panelizar(df: pd.DataFrame) -> pd.DataFrame:
                     "IDTOMOCONT": id_tomocont,
                     "tipo_entidad": tipo_panel,
                     "entidad": entidad,
-                    "atributo": "",
+                    "gentilicio": "",
+                    "vecindad": "",
+                    "ocupacion": "",
+                    "relacion": "",
                 }
                 if tipo_panel == "persona":
                     fila["IDPER"] = id_ent
                     fila["IDTOMOCONTPER"] = f"{id_tomocont}{id_ent}"
-                    fila["atributo"] = atributos_dict.get(entidad, "")
+                    attr = atributos_dict.get(entidad, _EMPTY_ATTR)
+                    fila["gentilicio"] = attr.get("gentilicio", "")
+                    fila["vecindad"] = attr.get("vecindad", "")
+                    fila["ocupacion"] = attr.get("ocupacion", attr.get("oficio", ""))
+                    fila["relacion"] = attr.get("relacion", "")
                 elif tipo_panel == "nao":
                     fila["IDNAO"] = id_ent
                     fila["IDTOMOCONTNAO"] = f"{id_tomocont}{id_ent}"
@@ -176,7 +212,10 @@ def panelizar(df: pd.DataFrame) -> pd.DataFrame:
                 "IDTOMOCONT": id_tomocont,
                 "tipo_entidad": "",
                 "entidad": "",
-                "atributo": "",
+                "gentilicio": "",
+                "vecindad": "",
+                "ocupacion": "",
+                "relacion": "",
             })
 
     df_panel = pd.DataFrame(filas)
@@ -186,7 +225,7 @@ def panelizar(df: pd.DataFrame) -> pd.DataFrame:
         "IDPER", "IDNAO", "IDLUG",
         "IDTOMOCONTPER", "IDTOMOCONTNAO", "IDTOMOCONTLUG",
     ]
-    cols_orden = ["contrato_idx", "tomo_id", "id_num", "tipo_entidad", "entidad", "atributo"] + cols_ids + [
+    cols_orden = ["contrato_idx", "tomo_id", "id_num", "tipo_entidad", "entidad", "gentilicio", "vecindad", "ocupacion", "relacion"] + cols_ids + [
         c for c in cols_presentes if c not in ("tomo_id", "id_num")
     ]
     cols_orden = [c for c in cols_orden if c in df_panel.columns]
@@ -209,10 +248,10 @@ def exportar_panel_multihoja(df_panel: pd.DataFrame, out_path: Path) -> dict[str
     ]
     # Columnas de contrato (las que existan)
     cols_contrato = [
-        "id_num_original", "id_status", "macrodatos",
+        "id_num_original", "id_status", "tipo", "macrodatos",
         "año", "año_num", "oficio", "libro", "escribania",
         "folio", "fecha", "signatura", "asunto", "observaciones",
-        "n_subregistros", "ocr_flag", "ocr_flagged",
+        "ocr_flag", "ocr_flagged",
     ]
 
     def _cols_disponibles(cols: list[str], df: pd.DataFrame) -> list[str]:
@@ -221,7 +260,7 @@ def exportar_panel_multihoja(df_panel: pd.DataFrame, out_path: Path) -> dict[str
     hojas = {
         "personas": {
             "filtro": df_panel["tipo_entidad"] == "persona",
-            "cols_propias": ["entidad", "atributo", "IDPER", "IDTOMOCONTPER"],
+            "cols_propias": ["entidad", "gentilicio", "vecindad", "ocupacion", "relacion", "IDPER", "IDTOMOCONTPER"],
         },
         "naos": {
             "filtro": df_panel["tipo_entidad"] == "nao",
@@ -232,6 +271,11 @@ def exportar_panel_multihoja(df_panel: pd.DataFrame, out_path: Path) -> dict[str
             "cols_propias": ["entidad", "IDLUG", "IDTOMOCONTLUG"],
         },
     }
+
+    # Contratos que mencionan al menos una nao
+    contratos_con_nao = set(
+        df_panel.loc[df_panel["tipo_entidad"] == "nao", "contrato_idx"].unique()
+    )
 
     counts = {}
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
@@ -246,6 +290,7 @@ def exportar_panel_multihoja(df_panel: pd.DataFrame, out_path: Path) -> dict[str
             # Renombrar entidad al tipo especifico
             if nombre == "personas":
                 df_hoja = df_hoja.rename(columns={"entidad": "persona"})
+                df_hoja["tiene_nao"] = df_hoja["contrato_idx"].isin(contratos_con_nao).astype(int)
             elif nombre == "naos":
                 df_hoja = df_hoja.rename(columns={"entidad": "nao"})
             elif nombre == "lugares":

@@ -297,7 +297,7 @@ def detectar_boxes_yolo(
     tomos_filter: set[str] | None = None,
     conf: float = 0.25,
     imgsz: int = 1536,
-    batch: int = 8,
+    batch: int = 1,
 ) -> pd.DataFrame:
     from ultralytics import YOLO
 
@@ -385,6 +385,19 @@ def guardar_crops_y_manifest(df_boxes: pd.DataFrame, run_dir: Path) -> pd.DataFr
     return df_manifest
 
 
+_OCR_PAD_PX = 150  # ~2 cm a 200 DPI
+
+
+def _pad_crop(crop_path: str, tmp_dir: Path) -> str:
+    """Añade padding blanco alrededor del crop para mejorar lectura OCR."""
+    from PIL import Image, ImageOps
+    img = Image.open(crop_path)
+    padded = ImageOps.expand(img, border=_OCR_PAD_PX, fill="white")
+    out = tmp_dir / f"pad_{Path(crop_path).name}"
+    padded.save(str(out))
+    return str(out)
+
+
 def _ocr_texto_crop(model, tokenizer, crop_path: str, prompt: str, tmp_dir: Path, max_retries: int) -> tuple[str, str, str]:
     prompts = [prompt] + OCR_PROMPTS_RETRY[:max(max_retries - 1, 0)]
     best_text = ""
@@ -455,10 +468,11 @@ def ocr_boxes_a_paginas(
     t0 = time.time()
 
     for count, row in enumerate(df_ok.to_dict("records"), start=1):
+        padded_path = _pad_crop(row["crop_path"], tmp_dir)
         text, ocr_status, ocr_flags = _ocr_texto_crop(
             model,
             tokenizer,
-            row["crop_path"],
+            padded_path,
             prompt,
             tmp_dir,
             max_retries,
@@ -485,6 +499,7 @@ def ocr_boxes_a_paginas(
             torch.cuda.empty_cache()
 
     df_ocr = pd.DataFrame(rows_out)
+    df_ocr = df_ocr.sort_values(["tomo", "page_num", "sort_idx"]).reset_index(drop=True)
     ocr_path = run_dir / "ocr_boxes.csv"
     df_ocr.to_csv(ocr_path, index=False, encoding="utf-8-sig")
 
@@ -507,7 +522,7 @@ def generar_pages_desde_yolo_ocr(
     tomos_filter: set[str] | None = None,
     yolo_conf: float = 0.25,
     yolo_imgsz: int = 640,
-    yolo_batch: int = 4,
+    yolo_batch: int = 1,
     ocr_model: str = "deepseek-ai/DeepSeek-OCR",
     ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
     ocr_device: str | None = None,
@@ -527,6 +542,12 @@ def generar_pages_desde_yolo_ocr(
         imgsz=yolo_imgsz,
         batch=yolo_batch,
     )
+    # Liberar VRAM de YOLO antes de cargar DeepSeek-OCR
+    import gc, torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
     df_manifest = guardar_crops_y_manifest(df_boxes, run_dir)
     return ocr_boxes_a_paginas(
         df_manifest=df_manifest,
@@ -556,6 +577,7 @@ def limpiar_ocr_boxes(run_dir: Path) -> Path:
     df["ocr_text_clean"] = df["ocr_text"].fillna("").apply(limpiar_ocr_text)
     df["ocr_chars_clean"] = df["ocr_text_clean"].str.len()
 
+    df = df.sort_values(["tomo", "page_num", "sort_idx"]).reset_index(drop=True)
     df.to_csv(ocr_path, index=False, encoding="utf-8-sig")
     logger.info(f"ocr_text_clean agregado a {ocr_path}")
 
@@ -583,7 +605,115 @@ def limpiar_ocr_boxes(run_dir: Path) -> Path:
 
 
 # =====================================================================
-# 1. FLAGGEO DE CALIDAD OCR
+# 1. AGRUPAR CROPS EN CONTRATOS
+# =====================================================================
+
+
+def agrupar_contratos(run_dir: Path) -> pd.DataFrame:
+    """Agrupa crops de ocr_boxes.csv en contratos usando clases YOLO.
+
+    Logica: recorre crops ordenados (tomo, page_num, sort_idx).
+    Cada crop 'contrato' es un contrato nuevo.  Si el primer crop de
+    una pagina es 'continuacion' y el ultimo de la pagina anterior era
+    'contrato', se une al contrato anterior.
+
+    Retorna DataFrame con columnas: tomo_id, id_num, texto_completo,
+    page_inicio, page_fin, n_crops.
+    """
+    ocr_path = run_dir / "ocr_boxes.csv"
+    if not ocr_path.exists():
+        raise FileNotFoundError(f"No existe {ocr_path}")
+
+    df = pd.read_csv(ocr_path, encoding="utf-8-sig")
+    df = df.sort_values(["tomo", "page_num", "sort_idx"]).reset_index(drop=True)
+
+    contratos: list[dict] = []
+    current: dict | None = None
+
+    for _, row in df.iterrows():
+        clase = row["class_name"]
+        texto = str(row.get("ocr_text_clean", "") or "").strip()
+        tomo = row["tomo"]
+        page = int(row["page_num"])
+        sort_idx = int(row["sort_idx"])
+
+        # Solo unir si es continuacion Y es el primer crop de la pagina
+        es_continuacion = (clase == "continuacion" and sort_idx == 1
+                           and current is not None)
+
+        if es_continuacion:
+            # Anexar al contrato anterior (cruce entre paginas)
+            if texto:
+                current["textos"].append(texto)
+            current["page_fin"] = page
+            current["n_crops"] += 1
+        else:
+            # Nuevo contrato (clase 'contrato', o continuacion que no es primer crop)
+            if current is not None:
+                contratos.append(current)
+            current = {
+                "tomo_id": tomo.replace(" ", "_"),
+                "textos": [texto] if texto else [],
+                "class_origin": clase,
+                "page_inicio": page,
+                "page_fin": page,
+                "n_crops": 1,
+            }
+
+    if current is not None:
+        contratos.append(current)
+
+    # Construir DataFrame final
+    rows_out: list[dict] = []
+    for c in contratos:
+        texto_completo = " ".join(c["textos"])
+
+        # Extraer id_num del inicio del texto (ej: "56 Libro del año...")
+        id_num = None
+        m = re.match(r"^(\d+)\s+", texto_completo)
+        if m:
+            id_num = int(m.group(1))
+
+        rows_out.append({
+            "tomo_id": c["tomo_id"],
+            "id_num": id_num,
+            "texto_completo": texto_completo,
+            "class_origin": c["class_origin"],
+            "page_inicio": c["page_inicio"],
+            "page_fin": c["page_fin"],
+            "n_crops": c["n_crops"],
+        })
+
+    df_out = pd.DataFrame(rows_out)
+    df_out["id_num"] = df_out["id_num"].astype("Int64")
+
+    n_cont = len([r for r in rows_out if r["n_crops"] == 1])
+    n_multi = len([r for r in rows_out if r["n_crops"] > 1])
+    logger.info(f"{len(rows_out):,} contratos agrupados ({n_cont} simples, {n_multi} multi-crop)")
+
+    # Parseo de campos estructurados
+    logger.info("Parseando campos estructurados...")
+    df_parsed = parsear_contratos(df_out)
+
+    # Recuperar columnas de agrupacion que parsear_contratos no incluye
+    df_parsed["class_origin"] = df_out["class_origin"].values
+    df_parsed["page_inicio"] = df_out["page_inicio"].values
+    df_parsed["page_fin"] = df_out["page_fin"].values
+    df_parsed["n_crops"] = df_out["n_crops"].values
+
+    out_path = run_dir / "contratos_agrupados.xlsx"
+    try:
+        df_parsed.to_excel(out_path, index=False)
+    except PermissionError:
+        out_path = run_dir / "contratos_agrupados_v2.xlsx"
+        df_parsed.to_excel(out_path, index=False)
+    logger.info(f"Exportado: {out_path}")
+
+    return df_parsed
+
+
+# =====================================================================
+# 2. FLAGGEO DE CALIDAD OCR
 # =====================================================================
 
 RE_NO_LATINO = re.compile(
@@ -686,18 +816,31 @@ _RE_GROUNDING_LINE = re.compile(
     r"^\s*<\|ref\|>.*?<\|/det\|>\s*$", re.MULTILINE
 )
 _RE_GROUNDING_TAG = re.compile(r"<\|/?(?:ref|det)\|>")
-_RE_COORDS = re.compile(r"\[\[\d[\d,\s]*\]\]")
+_RE_COORDS = re.compile(r"\[\[[\d,\s]*\]?\]?")
+_RE_COORDS_PARTIAL = re.compile(r"\[\[[^\]]*$", re.MULTILINE)
+_RE_DECODE_GARBAGE = re.compile(r"(?:\w?\)[\d)]{4,})")
 _RE_MD_HEADER = re.compile(r"^#{1,3}\s+", re.MULTILINE)
+_RE_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _RE_DEHYPHEN = re.compile(r"(\w)-\s*\n\s*(\w)")
+_RE_DEHYPHEN_INLINE = re.compile(r"(\w)- ?(\w)")
 _RE_BLANK_LINES = re.compile(r"\n{3,}")
+_RE_WORD_TEXT = re.compile(r"\btext\w?\b", re.IGNORECASE)
+_RE_STRAY_PUNCT = re.compile(r"(?:^|\s)[\-–—,;:*]{1,3}(?:\s|$)")
+_RE_DEDUP_FRASES = re.compile(r"(\b.{4,80}?[.!?])\s*(?:\1\s*){1,}")
 
 
 def _strip_grounding(texto: str) -> str:
-    """Elimina tags de grounding y coordenadas del output OCR."""
+    """Elimina tags de grounding, coordenadas, markdown y residuos del output OCR."""
     texto = _RE_GROUNDING_LINE.sub("", texto)
     texto = _RE_GROUNDING_TAG.sub("", texto)
     texto = _RE_COORDS.sub("", texto)
+    texto = _RE_COORDS_PARTIAL.sub("", texto)
+    texto = _RE_DECODE_GARBAGE.sub("", texto)
     texto = _RE_MD_HEADER.sub("", texto)
+    texto = _RE_MD_BOLD.sub(r"\1", texto)
+    texto = _RE_WORD_TEXT.sub("", texto)
+    texto = _RE_STRAY_PUNCT.sub(" ", texto)
+    texto = _RE_DEDUP_FRASES.sub(r"\1", texto)
     return texto
 
 
@@ -716,6 +859,66 @@ def _join_lines(texto: str) -> str:
     return " ".join(parts)
 
 
+_FIELD_LABELS = {
+    "Escribanía": 4,
+    "Oficio": 2,
+    "Folio": 2,
+    "Fecha": 2,
+    "Signatura": 3,
+    "Asunto": 2,
+    "Observaciones": 4,
+}
+# Captura: separador (— . espacio inicio) + palabra(s) + : o ;
+# El grupo 1 es el separador previo, grupo 2 es el candidato a label
+_RE_LABEL_CANDIDATE = re.compile(
+    r"((?:^|[.—–\-]\s*))([A-ZÁÉÍÓÚa-záéíóú][\w\s:]{0,18}?)\s*[;:]"
+)
+
+
+def _normalizar_labels(texto: str) -> str:
+    """Normaliza etiquetas de campo corruptas por OCR usando Levenshtein."""
+    def _repl(m: re.Match) -> str:
+        prefix = m.group(1)
+        candidato = m.group(2).strip()
+        # Quitar puntuacion/espacios internos para comparar
+        candidato_norm = re.sub(r"[\s:\-–—.]+", "", candidato)
+        for label, max_dist in _FIELD_LABELS.items():
+            label_ascii = label.replace("í", "i").replace("á", "a")
+            dist = _levenshtein(candidato_norm, label_ascii)
+            if dist <= max_dist:
+                return f"{prefix}{label}:"
+        return m.group(0)
+
+    texto = _RE_LABEL_CANDIDATE.sub(_repl, texto)
+    # Limpiar fragmentos residuales post-normalizacion (ej: "Escribanía: nía:" → "Escribanía:")
+    for label in _FIELD_LABELS:
+        texto = re.sub(rf"({label}:)\s+[a-záéíóú]{{1,5}}:", r"\1", texto)
+    return texto
+
+
+_RE_ESCRIBANIA_FUZZY = re.compile(
+    r'([.—–\-]\s*)'                  # separador previo
+    r'[EeFfIi][A-Za-záéíóúñ:.*\'\-]{3,14}'  # cuerpo garbled
+    r'(?=[;:.]\s*[A-ZÁÉÍÓÚ])',        # seguido de :/.  + nombre propio
+    re.UNICODE,
+)
+
+
+def _normalizar_escribania(texto: str) -> str:
+    """Reemplaza variantes corruptas de 'Escribanía' usando contexto posicional."""
+    def _repl(m: re.Match) -> str:
+        prefix = m.group(1)
+        candidato = m.group(0)[len(prefix):]
+        # Limpiar para comparar
+        norm = re.sub(r"[\s:\-–—.*']+", "", candidato)
+        norm_ascii = norm.replace("í", "i").replace("á", "a").replace("é", "e")
+        dist = _levenshtein(norm_ascii.lower(), "escribania")
+        if dist <= 5:
+            return f"{prefix}Escribanía"
+        return m.group(0)
+    return _RE_ESCRIBANIA_FUZZY.sub(_repl, texto)
+
+
 def limpiar_ocr_text(texto: str) -> str:
     """Limpieza completa de texto OCR: tags, guiones, saltos de linea."""
     if not texto or not texto.strip():
@@ -723,6 +926,9 @@ def limpiar_ocr_text(texto: str) -> str:
     texto = _strip_grounding(texto)
     texto = _dehyphenate_lines(texto)
     texto = _join_lines(texto)
+    texto = _RE_DEHYPHEN_INLINE.sub(r"\1\2", texto)
+    texto = _normalizar_escribania(texto)
+    texto = _normalizar_labels(texto)
     texto = _RE_BLANK_LINES.sub("\n\n", texto)
     return texto.strip()
 
@@ -1034,10 +1240,10 @@ def parsear_contratos(df: pd.DataFrame) -> pd.DataFrame:
         })
 
     columnas = [
-        "tomo_id", "id_num", "macrodatos", "asunto",
+        "tomo_id", "id_num", "texto_completo", "macrodatos",
         "año", "año_num", "oficio", "libro",
         "escribania", "folio", "fecha", "signatura",
-        "observaciones", "texto_completo",
+        "asunto", "observaciones",
         "n_subregistros", "_parse_ok",
     ]
 
@@ -1120,6 +1326,7 @@ def corregir_secuencia_ids(df: pd.DataFrame) -> pd.DataFrame:
     df["id_status"] = ""
 
     stats = {"ancla": 0, "rellenado": 0, "corregido": 0, "header": 0, "perdido_qty": 0}
+    perdidos: list[dict] = []  # filas placeholder para ids perdidos
 
     for tomo in df["tomo_id"].unique():
         mask_tomo = df["tomo_id"] == tomo
@@ -1155,12 +1362,20 @@ def corregir_secuencia_ids(df: pd.DataFrame) -> pd.DataFrame:
             pos_b, idx_b, id_b = anclas[k + 1]
             gap = id_b - id_a - 1  # contratos intermedios esperados
 
-            # Posiciones rellenables entre anclas (NULLs + sospechosos)
+            # Posiciones rellenables entre anclas
+            # Sospechosos (id corrupto) siempre son rellenables
+            # NULLs solo si su class_origin es 'contrato' (no 'continuacion')
             fillable = []
             for pos in range(pos_a + 1, pos_b):
                 idx = indices[pos]
-                if pd.isna(df.at[idx, "id_num_original"]) or pos in sosp_positions:
+                if pos in sosp_positions:
                     fillable.append((pos, idx))
+                elif pd.isna(df.at[idx, "id_num_original"]):
+                    if df.at[idx, "class_origin"] == "continuacion":
+                        df.at[idx, "id_status"] = "header"
+                        stats["header"] += 1
+                    else:
+                        fillable.append((pos, idx))
 
             if gap == 0:
                 # Consecutivas: NULLs son headers
@@ -1191,8 +1406,10 @@ def corregir_secuencia_ids(df: pd.DataFrame) -> pd.DataFrame:
                     df.at[idx, "id_status"] = status
                     stats[status] += 1
                     fill_id += 1
-                # Los ids restantes son genuinamente perdidos
-                stats["perdido_qty"] += gap - len(fillable)
+                # Generar filas placeholder para ids perdidos
+                for lost_id in range(fill_id, id_b):
+                    perdidos.append({"tomo_id": tomo, "id_num": lost_id, "id_status": "perdido"})
+                    stats["perdido_qty"] += 1
 
         # Sospechosos despues de la ultima ancla (sin clasificar)
         if anclas:
@@ -1202,12 +1419,27 @@ def corregir_secuencia_ids(df: pd.DataFrame) -> pd.DataFrame:
                 if df.at[idx, "id_status"] == "" and pos in sosp_positions:
                     df.at[idx, "id_status"] = "sospechoso"
 
+    # Insertar filas de perdidos en su posicion (justo antes de la ancla siguiente)
+    if perdidos:
+        # Cada perdido tiene tomo_id e id_num; insertarlo antes de la fila con id_num == perdido_id + 1
+        for p in sorted(perdidos, key=lambda x: x["id_num"], reverse=True):
+            # Buscar indice de la fila siguiente en el mismo tomo
+            mask = (df["tomo_id"] == p["tomo_id"]) & (df["id_num"] == p["id_num"] + 1)
+            pos = df.index[mask]
+            if len(pos) > 0:
+                insert_at = pos[0]
+            else:
+                insert_at = len(df)
+            row = pd.DataFrame([p])
+            df = pd.concat([df.iloc[:insert_at], row, df.iloc[insert_at:]], ignore_index=True)
+
     # Convertir id_num a Int64
     df["id_num"] = pd.to_numeric(df["id_num"], errors="coerce").astype("Int64")
     df["id_num_original"] = pd.to_numeric(df["id_num_original"], errors="coerce").astype("Int64")
 
+    n_headers = (df["id_status"] == "header").sum()
     logger.info(f"Anclas: {stats['ancla']:,} | Rellenados: {stats['rellenado']:,} | "
-               f"Corregidos: {stats['corregido']:,} | Headers: {stats['header']:,}")
+               f"Corregidos: {stats['corregido']:,} | Headers: {n_headers:,}")
     logger.info(f"Contratos perdidos por OCR: {stats['perdido_qty']:,}")
     return df
 
@@ -1374,28 +1606,103 @@ def resegmentar_perdidos(df: pd.DataFrame) -> pd.DataFrame:
 # 10. EXTRACCION DE ENTIDADES VIA OLLAMA
 # =====================================================================
 
-PROMPT_ENTIDADES = """Eres un experto en historia colonial española.
+# Parte estable del prompt (cacheable en Claude). Cambia solo el texto del contrato.
+PROMPT_ENTIDADES_SYSTEM = """Eres un experto en historia colonial española (siglos XV-XVI).
 
-Extrae del siguiente texto de un contrato notarial del siglo XV-XVI:
+Del texto de un contrato notarial, extrae:
 
-- personas: SOLO las partes contratantes — quienes firman, otorgan, se obligan, reciben, apodera, actúan como fiadores o testigos. NO incluyas personas que solo se mencionan como referencia, contexto o relación (ej. "siervo de X", "hijo de X difunto", "cobrar a X").
-- naos: lista de naves, naos o carabelas (nombres de barcos).
-- lugares: lista de lugares geográficos (ciudades, puertos, regiones).
-- atributos: objeto donde cada clave es un nombre de persona (exactamente igual al de "personas") y el valor es UN STRING con todas sus características explícitas separadas por "; ". Incluir: gentilicio, vecindad, oficio/cargo, nao asignada, y relaciones con otras personas mencionadas en el texto (ej. "siervo de Cristóbal Colón", "hijo de Francisco Fernández difunto", "para cobrar a Diego de Nécesa"). No inventar nada.
+1. **tipo**: categoría del contrato. Exactamente UNA de:
+   - "obligacion" (se obliga a pagar, prestar, abastecer)
+   - "fletamento" (fleta una nao, contrata transporte marítimo)
+   - "poder" (otorga poder a alguien para actuar en su nombre)
+   - "concierto" (se concierta para servir, acompañar, trabajar)
+   - "cobro" (cobra, carta de pago, recibe dinero)
+   - "compraventa" (vende, compra mercaderías o bienes)
+   - "capitulacion" (capitulaciones, acuerdos de armada)
+   - "testamento" (testamento, codicilo, última voluntad)
+   - "declaracion" (declara, reconoce deuda, confiesa)
+   - "otros" (ninguna de las anteriores)
+
+2. **personas**: SOLO las partes contratantes — quienes firman, otorgan, se obligan, reciben, apoderan, actúan como fiadores o testigos. NO incluyas personas mencionadas solo como referencia o contexto (ej. "siervo de X", "hijo de X difunto", "cobrar a X").
+
+3. **naos**: nombres de naves, naos o carabelas.
+
+4. **lugares**: lugares geográficos (ciudades, puertos, islas, regiones).
+
+5. **atributos**: objeto donde cada clave es un nombre de persona (exactamente igual al de "personas") y el valor es un OBJETO con estos campos (string, vacío si no aplica):
+   - "gentilicio": origen étnico/regional ("guipuzcoano", "genovés", "portugués")
+   - "vecindad": lugar de residencia ("vecino de Sevilla", "natural de Liébana")
+   - "oficio": ocupación o cargo ("maestre", "piloto", "mercader", "trabajador", "capitán")
+   - "relacion": vínculo con otras personas del texto ("siervo de Cristóbal Colón", "hijo de Francisco Fernández difunto")
 
 EJEMPLO:
-Texto: "Pepito Pérez, siervo de Cristóbal Colón, se compromete con Libia a..."
-Resultado:
-  personas: ["Pepito Pérez", "Libia"]
-  atributos: {{"Pepito Pérez": "siervo de Cristóbal Colón", "Libia": ""}}
+Texto: "Pepito Pérez, guipuzcoano, vecino de Cestona, maestre de la nao Trinidad, siervo de Cristóbal Colón, se compromete con Libia, genovesa, a..."
+{
+  "tipo": "obligacion",
+  "personas": ["Pepito Pérez", "Libia"],
+  "naos": ["Trinidad"],
+  "lugares": ["Cestona"],
+  "atributos": {
+    "Pepito Pérez": {"gentilicio": "guipuzcoano", "vecindad": "vecino de Cestona", "oficio": "maestre", "relacion": "siervo de Cristóbal Colón"},
+    "Libia": {"gentilicio": "genovesa", "vecindad": "", "oficio": "", "relacion": ""}
+  }
+}
 (Cristóbal Colón NO va en personas porque no es parte del contrato)
 
 REGLAS:
-- Si un campo no aplica, devuelve [].
-- Si una persona no tiene atributos explícitos, pon "".
-- Cada persona debe ser un nombre completo, no fragmentos ("don Martín de Tolosa", no "don Martín" + "de Tolosa").
-- Une palabras partidas por guion/salto de línea: "Gri- maldo" -> "Grimaldo", "tone- ladas" -> "toneladas".
-- Responde SOLO un JSON válido, sin texto adicional.
+- Si un campo no aplica, devuelve [] o {}.
+- Cada persona debe ser un nombre completo, no fragmentos.
+- Une palabras partidas por guion/salto: "Gri- maldo" -> "Grimaldo".
+- Responde SOLO un JSON válido, sin markdown ni explicación."""
+
+
+PROMPT_ENTIDADES = """Eres un experto en historia colonial española (siglos XV-XVI).
+
+Del siguiente texto de un contrato notarial, extrae:
+
+1. **tipo**: categoría del contrato. Exactamente UNA de:
+   - "obligacion" (se obliga a pagar, prestar, abastecer)
+   - "fletamento" (fleta una nao, contrata transporte marítimo)
+   - "poder" (otorga poder a alguien para actuar en su nombre)
+   - "concierto" (se concierta para servir, acompañar, trabajar)
+   - "cobro" (cobra, carta de pago, recibe dinero)
+   - "compraventa" (vende, compra mercaderías o bienes)
+   - "capitulacion" (capitulaciones, acuerdos de armada)
+   - "testamento" (testamento, codicilo, última voluntad)
+   - "declaracion" (declara, reconoce deuda, confiesa)
+   - "otros" (ninguna de las anteriores)
+
+2. **personas**: SOLO las partes contratantes — quienes firman, otorgan, se obligan, reciben, apoderan, actúan como fiadores o testigos. NO incluyas personas mencionadas solo como referencia o contexto (ej. "siervo de X", "hijo de X difunto", "cobrar a X").
+
+3. **naos**: nombres de naves, naos o carabelas.
+
+4. **lugares**: lugares geográficos (ciudades, puertos, islas, regiones).
+
+5. **atributos**: objeto donde cada clave es un nombre de persona (exactamente igual al de "personas") y el valor es un OBJETO con estos campos (string, vacío si no aplica):
+   - "gentilicio": origen étnico/regional ("guipuzcoano", "genovés", "portugués")
+   - "vecindad": lugar de residencia ("vecino de Sevilla", "natural de Liébana")
+   - "oficio": ocupación o cargo ("maestre", "piloto", "mercader", "trabajador", "capitán")
+   - "relacion": vínculo con otras personas del texto ("siervo de Cristóbal Colón", "hijo de Francisco Fernández difunto")
+
+EJEMPLO:
+Texto: "Pepito Pérez, guipuzcoano, vecino de Cestona, maestre de la nao Trinidad, siervo de Cristóbal Colón, se compromete con Libia, genovesa, a..."
+{{
+  "tipo": "obligacion",
+  "personas": ["Pepito Pérez", "Libia"],
+  "naos": ["Trinidad"],
+  "lugares": ["Cestona"],
+  "atributos": {{
+    "Pepito Pérez": {{"gentilicio": "guipuzcoano", "vecindad": "vecino de Cestona", "oficio": "maestre", "relacion": "siervo de Cristóbal Colón"}},
+    "Libia": {{"gentilicio": "genovesa", "vecindad": "", "oficio": "", "relacion": ""}}
+  }}
+}}
+(Cristóbal Colón NO va en personas porque no es parte del contrato)
+
+REGLAS:
+- Si un campo no aplica, devuelve [] o {{}}.
+- Cada persona debe ser un nombre completo, no fragmentos.
+- Une palabras partidas por guion/salto: "Gri- maldo" -> "Grimaldo".
+- Responde SOLO un JSON válido.
 
 TEXTO:
 \"\"\"{texto}\"\"\""""
@@ -1411,45 +1718,41 @@ def _check_ollama(ollama_url: str) -> bool:
         return False
 
 
-def _call_ollama(texto: str, ollama_url: str, model_name: str) -> Dict[str, List[str]]:
-    """Llama a Ollama para extraer entidades de un texto."""
-    payload = {
-        "model": model_name,
-        "prompt": PROMPT_ENTIDADES.format(texto=texto),
-        "stream": False,
-        "format": "json",
-        "options": {"num_ctx": 8192},
-        "think": False,
-    }
+_TIPOS_VALIDOS = {
+    "obligacion", "fletamento", "poder", "concierto", "cobro",
+    "compraventa", "capitulacion", "testamento", "declaracion", "otros",
+}
 
-    try:
-        resp = requests.post(ollama_url, json=payload, timeout=120)
-        resp.raise_for_status()
-        raw = resp.json().get("response", "{}")
-        result = json.loads(raw)
-    except Exception as e:
-        logger.warning(f"Error en Ollama: {e}")
-        return {"personas": [], "naos": [], "lugares": [], "atributos": {}}
+_ATTR_FIELDS_SLM = ("gentilicio", "vecindad", "oficio", "relacion")
 
+
+def _normalizar_entidades(result: dict) -> dict:
+    """Normaliza la salida de un SLM (Ollama o Claude) al formato interno."""
     def _norm(lst):
         if not isinstance(lst, list):
             return []
         return [x.strip() for x in lst if isinstance(x, str) and x.strip()]
 
+    tipo_raw = str(result.get("tipo", "")).strip().lower()
+    tipo = tipo_raw if tipo_raw in _TIPOS_VALIDOS else "otros"
+
     personas = _norm(result.get("personas", []))
     atributos_raw = result.get("atributos", {})
     if not isinstance(atributos_raw, dict):
         atributos_raw = {}
-    # Normalizar: solo claves que estan en personas, valores como string
-    atributos = {}
+    atributos: dict[str, dict[str, str]] = {}
     for p in personas:
-        val = atributos_raw.get(p, "")
-        if isinstance(val, str):
-            atributos[p] = val.strip()
+        val = atributos_raw.get(p, {})
+        if isinstance(val, dict):
+            atributos[p] = {k: str(val.get(k, "")).strip() for k in _ATTR_FIELDS_SLM}
+        elif isinstance(val, str):
+            atributos[p] = {k: "" for k in _ATTR_FIELDS_SLM}
+            atributos[p]["relacion"] = val.strip()
         else:
-            atributos[p] = ""
+            atributos[p] = {k: "" for k in _ATTR_FIELDS_SLM}
 
     return {
+        "tipo": tipo,
         "personas": personas,
         "naos": _norm(result.get("naos", [])),
         "lugares": _norm(result.get("lugares", [])),
@@ -1457,26 +1760,119 @@ def _call_ollama(texto: str, ollama_url: str, model_name: str) -> Dict[str, List
     }
 
 
+_claude_client = None
+
+
+def _get_claude_client():
+    global _claude_client
+    if _claude_client is None:
+        import anthropic
+        _claude_client = anthropic.Anthropic()
+    return _claude_client
+
+
+def _call_claude(texto: str, model_name: str = "claude-haiku-4-5") -> dict:
+    """Extrae entidades y tipo via Claude API con prompt caching."""
+    import anthropic
+    client = _get_claude_client()
+    empty = {"tipo": "", "personas": [], "naos": [], "lugares": [], "atributos": {}}
+
+    try:
+        resp = client.messages.create(
+            model=model_name,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": PROMPT_ENTIDADES_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": f'TEXTO:\n"""{texto}"""'}],
+        )
+    except anthropic.APIError as e:
+        logger.warning(f"Error en Claude API: {e}")
+        return empty
+
+    raw = next((b.text for b in resp.content if b.type == "text"), "")
+    m_json = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m_json:
+        logger.warning("Claude: respuesta sin JSON parseable")
+        return empty
+    try:
+        result = json.loads(m_json.group(0))
+    except json.JSONDecodeError as e:
+        logger.warning(f"Claude: JSON invalido: {e}")
+        return empty
+
+    return _normalizar_entidades(result)
+
+
+def _call_ollama(texto: str, ollama_url: str, model_name: str) -> dict:
+    """Llama a Ollama para extraer entidades y tipo de un texto."""
+    payload = {
+        "model": model_name,
+        "prompt": PROMPT_ENTIDADES.format(texto=texto),
+        "stream": False,
+        "options": {"num_ctx": 8192},
+        "think": True,
+    }
+
+    max_retries = 2
+    result = {}
+    for intento in range(max_retries):
+        try:
+            resp = requests.post(ollama_url, json=payload, timeout=300)
+            resp.raise_for_status()
+            data = resp.json()
+            # Buscar JSON en response primero, luego en thinking (fallback con think:true)
+            raw = data.get("response", "")
+            m_json = re.search(r"\{.*\}", raw, re.DOTALL) if raw.strip() else None
+            if not m_json:
+                thinking = data.get("thinking", "")
+                m_json = re.search(r"\{.*\}", thinking, re.DOTALL) if thinking.strip() else None
+            if m_json:
+                result = json.loads(m_json.group(0))
+                break
+            # Sin JSON encontrado — reintentar
+            if intento < max_retries - 1:
+                logger.debug(f"Retry {intento+1}: sin JSON en response/thinking")
+        except Exception as e:
+            if intento < max_retries - 1:
+                logger.debug(f"Retry {intento+1}: {e}")
+            else:
+                logger.warning(f"Error en Ollama tras {max_retries} intentos: {e}")
+                return {"tipo": "", "personas": [], "naos": [], "lugares": [], "atributos": {}}
+
+    return _normalizar_entidades(result)
+
+
 def extraer_entidades(
     df: pd.DataFrame,
     run_dir: Path,
+    extractor: str = "ollama",
     ollama_url: str = "http://localhost:11434/api/generate",
     model_name: str = "qwen3.5:9b",
+    claude_model: str = "claude-haiku-4-5",
     max_entidades: int = 0,
 ) -> pd.DataFrame:
-    """Extrae personas, naos y lugares de la columna asunto via Ollama."""
+    """Extrae personas, naos y lugares de la columna asunto via Ollama o Claude."""
 
-    # Health check
-    if not _check_ollama(ollama_url):
-        logger.error(f"Ollama no disponible en {ollama_url}. Inicia con: ollama serve")
-        logger.warning("Saltando extraccion de entidades.")
-        df["personas"] = ""
-        df["naos"] = ""
-        df["lugares"] = ""
-        df["atributos"] = ""
-        return df
-
-    logger.info(f"Modelo: {model_name} | URL: {ollama_url}")
+    if extractor == "claude":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            logger.error("ANTHROPIC_API_KEY no esta definida. Saltando extraccion.")
+            df["tipo"] = ""; df["personas"] = ""; df["naos"] = ""
+            df["lugares"] = ""; df["atributos"] = ""
+            return df
+        logger.info(f"Extractor: Claude API | Modelo: {claude_model}")
+    else:
+        if not _check_ollama(ollama_url):
+            logger.error(f"Ollama no disponible en {ollama_url}. Inicia con: ollama serve")
+            logger.warning("Saltando extraccion de entidades.")
+            df["tipo"] = ""; df["personas"] = ""; df["naos"] = ""
+            df["lugares"] = ""; df["atributos"] = ""
+            return df
+        logger.info(f"Extractor: Ollama | Modelo: {model_name} | URL: {ollama_url}")
 
     # Filtrar contratos con asunto no vacio
     mask = df["asunto"].fillna("").str.strip().astype(bool)
@@ -1489,6 +1885,7 @@ def extraer_entidades(
     total = len(indices)
     logger.info(f"{total:,} contratos con asunto para procesar")
 
+    tipo_col = [""] * len(df)
     personas_col = [""] * len(df)
     naos_col = [""] * len(df)
     lugares_col = [""] * len(df)
@@ -1499,21 +1896,22 @@ def extraer_entidades(
 
     for count, idx in enumerate(indices, start=1):
         texto = df.at[idx, "asunto"]
-        entidades = _call_ollama(texto, ollama_url, model_name)
+        if extractor == "claude":
+            entidades = _call_claude(texto, claude_model)
+        else:
+            entidades = _call_ollama(texto, ollama_url, model_name)
 
-        if all(v == [] for k, v in entidades.items() if k != "atributos"):
+        if all(v == [] for k, v in entidades.items() if k not in ("atributos", "tipo")):
             errores += 1
 
         pos = df.index.get_loc(idx)
+        tipo_col[pos] = entidades.get("tipo", "")
         personas_col[pos] = "; ".join(entidades["personas"])
         naos_col[pos] = "; ".join(entidades["naos"])
         lugares_col[pos] = "; ".join(entidades["lugares"])
-        # Serializar atributos como "nombre::desc || nombre::desc"
         attr = entidades.get("atributos", {})
         if attr:
-            atributos_col[pos] = " || ".join(
-                f"{k}::{v}" for k, v in attr.items() if v
-            )
+            atributos_col[pos] = json.dumps(attr, ensure_ascii=False)
 
         # Progreso cada 100
         if count % 100 == 0:
@@ -1526,6 +1924,7 @@ def extraer_entidades(
         # Checkpoint cada 500
         if count % 500 == 0:
             df_tmp = df.copy()
+            df_tmp["tipo"] = tipo_col
             df_tmp["personas"] = personas_col
             df_tmp["naos"] = naos_col
             df_tmp["lugares"] = lugares_col
@@ -1533,6 +1932,7 @@ def extraer_entidades(
             ckpt_path = run_dir / "compilado_parcial.xlsx"
             df_tmp.to_excel(ckpt_path, index=False)
 
+    df["tipo"] = tipo_col
     df["personas"] = personas_col
     df["naos"] = naos_col
     df["lugares"] = lugares_col
@@ -1587,7 +1987,7 @@ def run_pipeline(
     yolo_model_path: Path = Path("models/yolo_obb_v1/weights/best.pt"),
     yolo_conf: float = 0.25,
     yolo_imgsz: int = 640,
-    yolo_batch: int = 4,
+    yolo_batch: int = 1,
     ocr_model: str = "deepseek-ai/DeepSeek-OCR",
     ocr_prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
     ocr_device: str | None = None,
@@ -1599,6 +1999,8 @@ def run_pipeline(
     skip_red_personas: bool = False,
     ollama_url: str = "http://localhost:11434/api/generate",
     ollama_model: str = "qwen3.5:9b",
+    extractor: str = "ollama",
+    claude_model: str = "claude-haiku-4-5",
     max_entidades: int = 0,
 ) -> Path:
     # Crear directorio de corrida
@@ -1612,11 +2014,11 @@ def run_pipeline(
     usa_pages_existentes = pages_dir is not None
 
     if solo_ocr:
-        n_pasos = 0
+        n_pasos = 1  # agrupacion siempre
         if not usa_pages_existentes:
             n_pasos += 1  # YOLO + OCR
     else:
-        n_pasos = 8
+        n_pasos = 5
         if not usa_pages_existentes:
             n_pasos += 1
         if not skip_entidades:
@@ -1640,6 +2042,8 @@ def run_pipeline(
     else:
         if skip_entidades:
             logger.info("Entidades: DESACTIVADO (--skip-entidades)")
+        elif extractor == "claude":
+            logger.info(f"Entidades: Claude API ({claude_model})")
         else:
             logger.info(f"Entidades: {ollama_model} @ {ollama_url}")
         if skip_red_personas:
@@ -1673,41 +2077,21 @@ def run_pipeline(
         logger.info(f"[{paso}/{n_pasos}] Filtrando pages por tomo...")
         effective_pages = filtrar_pages_por_tomo(effective_pages, run_dir, tomos_filter)
 
-    # --solo-ocr: parar aqui, solo YOLO + OCR + guardado
+    # 1. Agrupar crops en contratos (via clases YOLO)
+    paso += 1
+    logger.info(f"[{paso}/{n_pasos}] Agrupando crops en contratos...")
+    df_seg = agrupar_contratos(run_dir)
+
+    # --solo-ocr: parar aqui despues de YOLO + OCR + limpieza + agrupacion
     if solo_ocr:
         elapsed = time.time() - t_start
         _log_resumen_run(run_dir, elapsed)
         return run_dir
 
-    # 1. Calidad OCR
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Evaluando calidad OCR...")
-    df_calidad = flaggear_ocr(effective_pages, run_dir)
-
-    # 2. Consolidar tomos
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Consolidando tomos (union inteligente)...")
-    tomos_dir = consolidar_tomos(effective_pages, run_dir)
-
-    # 3. Segmentar contratos
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Segmentando contratos...")
-    df_seg = segmentar_tomos(tomos_dir, run_dir)
-
-    # 4. Parsear campos
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Parseando campos estructurados...")
-    df_parsed = parsear_contratos(df_seg)
-
-    # 5. Cruzar flags OCR
-    paso += 1
-    logger.info(f"[{paso}/{n_pasos}] Cruzando flags OCR...")
-    df_final = _cruzar_flags_ocr(df_parsed, df_calidad)
-
-    # 6. Corregir secuencia id_num
+    # 2. Corregir secuencia id_num
     paso += 1
     logger.info(f"[{paso}/{n_pasos}] Corrigiendo secuencia id_num...")
-    df_final = corregir_secuencia_ids(df_final)
+    df_final = corregir_secuencia_ids(df_seg)
 
     # 7. Re-segmentar contratos enterrados
     paso += 1
@@ -1718,7 +2102,14 @@ def run_pipeline(
     if not skip_entidades:
         paso += 1
         logger.info(f"[{paso}/{n_pasos}] Extrayendo entidades (personas, naos, lugares, atributos)...")
-        df_final = extraer_entidades(df_final, run_dir, ollama_url, ollama_model, max_entidades)
+        df_final = extraer_entidades(
+            df_final, run_dir,
+            extractor=extractor,
+            ollama_url=ollama_url,
+            model_name=ollama_model,
+            claude_model=claude_model,
+            max_entidades=max_entidades,
+        )
 
     out_path = run_dir / "compilado.xlsx"
     df_final.to_excel(out_path, index=False)
@@ -1832,8 +2223,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--yolo-batch",
         type=int,
-        default=4,
-        help="Batch de YOLO sobre paginas (default: 4)",
+        default=1,
+        help="Batch de YOLO sobre paginas (default: 1)",
     )
     parser.add_argument(
         "--ocr-model",
@@ -1876,6 +2267,17 @@ if __name__ == "__main__":
         "--ollama-model",
         default="qwen3.5:9b",
         help="Modelo de Ollama para extraccion (default: qwen3.5:9b)",
+    )
+    parser.add_argument(
+        "--extractor",
+        choices=["ollama", "claude"],
+        default="ollama",
+        help="Backend para extraccion de entidades (default: ollama)",
+    )
+    parser.add_argument(
+        "--claude-model",
+        default="claude-haiku-4-5",
+        help="Modelo de Claude para extraccion (default: claude-haiku-4-5)",
     )
     parser.add_argument(
         "--max-entidades",
@@ -1926,5 +2328,7 @@ if __name__ == "__main__":
         skip_red_personas=args.skip_red_personas,
         ollama_url=args.ollama_url,
         ollama_model=args.ollama_model,
+        extractor=args.extractor,
+        claude_model=args.claude_model,
         max_entidades=args.max_entidades,
     )

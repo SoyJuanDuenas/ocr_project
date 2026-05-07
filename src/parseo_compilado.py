@@ -36,8 +36,8 @@ _SEP = r'[\s.—–\-,;]'
 _PUNCT = r'[;:]'
 
 # Divide header de body
-RE_ASUNTO = re.compile(rf'{_SEP}+A[su][uú]n[t\']o\s*{_PUNCT}\s*', re.I)
-RE_ASUNTO_FALLBACK = re.compile(rf'{_SEP}+Asunto\s+', re.I)
+RE_ASUNTO = re.compile(rf'{_SEP}+A[su][uú]n[^\s:;]{{0,2}}o\s*{_PUNCT}\s*', re.I)
+RE_ASUNTO_FALLBACK = re.compile(rf'{_SEP}+A[su][uú]n[^\s:;]{{0,2}}o\s+', re.I)
 RE_OBSERVACIONES = re.compile(rf'{_SEP}+Observaciones\s*{_PUNCT}\s*', re.I)
 
 # Labels del header (entre "Libro del año:" y "Asunto:")

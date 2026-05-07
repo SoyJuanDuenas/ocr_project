@@ -1,0 +1,247 @@
+{
+  "1238": {
+    "personas": ["Rodrigo de Marchena", "Juan Fernández de Grimaldo", "Gaspar Centurión"],
+    "atributos": {
+      "Rodrigo de Marchena": {"gentilicio": "", "vecindad": "Santo Domingo", "oficio": "mercader", "relacion": ""},
+      "Juan Fernández de Grimaldo": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "prestamista"},
+      "Gaspar Centurión": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "prestamista"}
+    }
+  },
+  "1239": {
+    "personas": ["Gonzalo Ferrández Camacho", "Pedro González Najar"],
+    "atributos": {
+      "Gonzalo Ferrández Camacho": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "otorgante"},
+      "Pedro González Najar": {"gentilicio": "", "vecindad": "", "oficio": "maestre", "relacion": "poder"}
+    }
+  },
+  "1246": {
+    "personas": ["Bernardino de Isla", "Pedro de Isla", "Juan Cho", "García de Isla", "Diego de Salamanca"],
+    "atributos": {
+      "Bernardino de Isla": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "otorgante"},
+      "Pedro de Isla": {"gentilicio": "", "vecindad": "Santo Domingo", "oficio": "", "relacion": "poder"},
+      "Juan Cho": {"gentilicio": "", "vecindad": "Santo Domingo", "oficio": "criado", "relacion": "poder"},
+      "García de Isla": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "deudor"},
+      "Diego de Salamanca": {"gentilicio": "", "vecindad": "", "oficio": "mercader burgalés", "relacion": "acreedor"}
+    }
+  },
+  "1248": {
+    "personas": ["Alfonso Ramos", "Francisco Martínez", "Juan Francisco de Grimaldo", "Gaspar Centurión"],
+    "atributos": {
+      "Alfonso Ramos": {"gentilicio": "", "vecindad": "", "oficio": "marinero", "relacion": "deudor"},
+      "Francisco Martínez": {"gentilicio": "", "vecindad": "", "oficio": "calafate", "relacion": "deudor"},
+      "Juan Francisco de Grimaldo": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"},
+      "Gaspar Centurión": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"}
+    }
+  },
+  "1249": {
+    "personas": ["Diego Sánchez", "Alfonso Bazo"],
+    "atributos": {
+      "Diego Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": "deudor"},
+      "Alfonso Bazo": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"}
+    }
+  },
+  "1250": {
+    "personas": ["Juan Sánchez", "Miguel de Pasamonte", "Antón de Zamora"],
+    "atributos": {
+      "Juan Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "procurador"},
+      "Miguel de Pasamonte": {"gentilicio": "", "vecindad": "", "oficio": "estudiante en Salamanca; tesorero Indias", "relacion": ""},
+      "Antón de Zamora": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "acreedor"}
+    }
+  },
+  "1251": {
+    "personas": ["Diego de Roelas", "Francisco de Lizana"],
+    "atributos": {
+      "Diego de Roelas": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "otorgante"},
+      "Francisco de Lizana": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "poder"}
+    }
+  },
+  "1253": {
+    "personas": ["Antón de Noria", "Diego", "Pedro de Nagabea", "Domingo de Gerendica", "Juan Gil"],
+    "atributos": {
+      "Antón de Noria": {"gentilicio": "vizcaíno", "vecindad": "", "oficio": "mercader", "relacion": "otorgante"},
+      "Domingo de Gerendica": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""},
+      "Juan Gil": {"gentilicio": "", "vecindad": "isla San Juan", "oficio": "", "relacion": ""}
+    }
+  },
+  "1254": {
+    "personas": ["Antón Rodríguez", "Jerónimo Grimaldo"],
+    "atributos": {
+      "Antón Rodríguez": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "requerido"},
+      "Jerónimo Grimaldo": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": ""}
+    }
+  },
+  "1255": {
+    "personas": ["Rodrigo de Narváez", "Manuel de Figueroa"],
+    "atributos": {
+      "Rodrigo de Narváez": {"gentilicio": "", "vecindad": "", "oficio": "cómitre", "relacion": "vendedor"},
+      "Manuel de Figueroa": {"gentilicio": "", "vecindad": "", "oficio": "mercader genovés", "relacion": "comprador"}
+    }
+  },
+  "1256": {
+    "personas": ["Francisco Rodríguez Zarco", "Juan Ramos"],
+    "atributos": {
+      "Francisco Rodríguez Zarco": {"gentilicio": "", "vecindad": "", "oficio": "señor navío", "relacion": "otorgante"},
+      "Juan Ramos": {"gentilicio": "", "vecindad": "", "oficio": "señor navío; maestre", "relacion": "poder"}
+    }
+  },
+  "1257": {
+    "personas": ["Juan López", "Fernando Díaz de Santa Cruz"],
+    "atributos": {
+      "Juan López": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""},
+      "Fernando Díaz de Santa Cruz": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1258": {
+    "personas": ["Ferrando de Montalbán", "Juan Francisco Grimaldo", "Gaspar Centurión"],
+    "atributos": {
+      "Ferrando de Montalbán": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "llegado Indias"},
+      "Juan Francisco Grimaldo": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "comprador oro"},
+      "Gaspar Centurión": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "comprador oro"}
+    }
+  },
+  "1259": {
+    "personas": ["Ginés Alonso", "Francisco de Escobar"],
+    "atributos": {
+      "Ginés Alonso": {"gentilicio": "", "vecindad": "", "oficio": "marinero", "relacion": "otorgante"},
+      "Francisco de Escobar": {"gentilicio": "", "vecindad": "", "oficio": "carpintero ribera", "relacion": "poder"}
+    }
+  },
+  "1260": {
+    "personas": ["Diego López Caro", "Pascual de Madrid", "Alvaro de Briones", "Fernando de Briones", "Antón Pisano"],
+    "atributos": {
+      "Diego López Caro": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "procurador"},
+      "Pascual de Madrid": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "suegro"},
+      "Alvaro de Briones": {"gentilicio": "", "vecindad": "", "oficio": "jurado", "relacion": ""},
+      "Fernando de Briones": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": ""},
+      "Antón Pisano": {"gentilicio": "", "vecindad": "Indias", "oficio": "", "relacion": ""}
+    }
+  },
+  "1261": {
+    "personas": ["Andrés García Cansino", "Diego Rodríguez"],
+    "atributos": {
+      "Andrés García Cansino": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""},
+      "Diego Rodríguez": {"gentilicio": "", "vecindad": "", "oficio": "cómitre", "relacion": ""}
+    }
+  },
+  "1262": {
+    "personas": ["Batista Cataño", "Bernardo de Castellón", "Tomás de Castellón"],
+    "atributos": {
+      "Batista Cataño": {"gentilicio": "genovés", "vecindad": "", "oficio": "mercader", "relacion": "otorgante"},
+      "Bernardo de Castellón": {"gentilicio": "genovés", "vecindad": "", "oficio": "mercader", "relacion": "poder"},
+      "Tomás de Castellón": {"gentilicio": "", "vecindad": "Indias", "oficio": "", "relacion": ""}
+    }
+  },
+  "1263": {
+    "personas": ["Bartolomé Sánchez", "Juan Francisco de Grimaldo", "Gaspar Centurión", "Lope Sánchez"],
+    "atributos": {
+      "Bartolomé Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "", "relacion": "deudor"},
+      "Juan Francisco de Grimaldo": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"},
+      "Gaspar Centurión": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"},
+      "Lope Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""}
+    }
+  },
+  "1264": {
+    "personas": ["Francisco Vara", "Juan de Córdoba"],
+    "atributos": {
+      "Francisco Vara": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""},
+      "Juan de Córdoba": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1265": {
+    "personas": ["Francisco Vara", "Martín Ferrández"],
+    "atributos": {
+      "Francisco Vara": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": ""},
+      "Martín Ferrández": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1266": {
+    "personas": ["Rodrigo de Narváez", "Juan Narváez", "Juan de Burgos", "Bernardo de la Torre"],
+    "atributos": {
+      "Rodrigo de Narváez": {"gentilicio": "", "vecindad": "", "oficio": "señor nao", "relacion": ""},
+      "Juan Narváez": {"gentilicio": "", "vecindad": "", "oficio": "maestre", "relacion": ""},
+      "Juan de Burgos": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""},
+      "Bernardo de la Torre": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1267": {
+    "personas": ["Bartolomé Díaz", "Cristóbal Sánchez"],
+    "atributos": {
+      "Bartolomé Díaz": {"gentilicio": "", "vecindad": "", "oficio": "señor nao", "relacion": "otorgante"},
+      "Cristóbal Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "señor nao; maestre", "relacion": "poder"}
+    }
+  },
+  "1268": {
+    "personas": ["Fernando López Morcillo", "Juan Rodríguez"],
+    "atributos": {
+      "Fernando López Morcillo": {"gentilicio": "", "vecindad": "", "oficio": "curtidor", "relacion": "deudor"},
+      "Juan Rodríguez": {"gentilicio": "genovés", "vecindad": "", "oficio": "maestre nao", "relacion": "acreedor"}
+    }
+  },
+  "1269": {
+    "personas": ["Cristóbal Sánchez", "Diego Ramos", "Gabriel de San Esteban", "Blas Ferrández"],
+    "atributos": {
+      "Cristóbal Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "señor maestre nao", "relacion": ""},
+      "Diego Ramos": {"gentilicio": "", "vecindad": "Puerto Rico", "oficio": "mercader", "relacion": ""},
+      "Gabriel de San Esteban": {"gentilicio": "", "vecindad": "Puerto Rico", "oficio": "mercader", "relacion": ""},
+      "Blas Ferrández": {"gentilicio": "", "vecindad": "Puerto Rico", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1270": {
+    "personas": ["Blas Fernández", "Cristóbal Sánchez"],
+    "atributos": {
+      "Blas Fernández": {"gentilicio": "", "vecindad": "Puerto Rico", "oficio": "mercader", "relacion": "deudor"},
+      "Cristóbal Sánchez": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": "acreedor"}
+    }
+  },
+  "1271": {
+    "personas": ["Rodrigo de Villarroel", "Juan de Villaria"],
+    "atributos": {
+      "Rodrigo de Villarroel": {"gentilicio": "", "vecindad": "San Juan de la Maguana", "oficio": "veedor isla", "relacion": "deudor"},
+      "Juan de Villaria": {"gentilicio": "", "vecindad": "", "oficio": "repostero camas Rey", "relacion": "acreedor"}
+    }
+  },
+  "1272": {
+    "personas": ["Juan Martínez", "Antón de Soria"],
+    "atributos": {
+      "Juan Martínez": {"gentilicio": "", "vecindad": "", "oficio": "señor maestro navío", "relacion": "deudor"},
+      "Antón de Soria": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": "acreedor"}
+    }
+  },
+  "1273": {
+    "personas": ["Francisco Vara", "Pery Juan Francés"],
+    "atributos": {
+      "Francisco Vara": {"gentilicio": "", "vecindad": "", "oficio": "maestre nao", "relacion": "comprador"},
+      "Pery Juan Francés": {"gentilicio": "", "vecindad": "", "oficio": "bachiller Medicina", "relacion": "vendedor vino"}
+    }
+  },
+  "1274": {
+    "personas": ["Pedro Fernández de Córdoba", "Juan de Córdoba"],
+    "atributos": {
+      "Pedro Fernández de Córdoba": {"gentilicio": "", "vecindad": "Santo Domingo", "oficio": "mercader", "relacion": ""],
+      "Juan de Córdoba": {"gentilicio": "", "vecindad": "", "oficio": "mercader", "relacion": ""}
+    }
+  },
+  "1275": {
+    "personas": ["Juan de Córdoba", "Pedro Fernández de Córdoba"],
+    "atributos": {
+      "Juan de Córdoba": {"gentilicio": "", "vecindad": "", "oficio": "platero", "relacion": "otorgante"},
+      "Pedro Fernández de Córdoba": {"gentilicio": "", "vecindad": "Indias", "oficio": "mercader", "relacion": "poder"}
+    }
+  },
+  "1276": {
+    "personas": ["Pedro de Tarifa", "Pedro de Sahelices", "Rodrigo Manuel"],
+    "atributos": {
+      "Pedro de Tarifa": {"gentilicio": "", "vecindad": "", "oficio": "sedero", "relacion": "otorgante"},
+      "Pedro de Sahelices": {"gentilicio": "", "vecindad": "Santo Domingo", "oficio": "sedero", "relacion": "poder"},
+      "Rodrigo Manuel": {"gentilicio": "", "vecindad": "", "oficio": "frutero", "relacion": "deudor"}
+    }
+  },
+  "1277": {
+    "personas": ["Pedro Benito de Busitrana", "Tomás de Castellar", "Fernando de Valladolid"],
+    "atributos": {
+      "Pedro Benito de Busitrana": {"gentilicio": "genovés", "vecindad": "", "oficio": "mercader", "relacion": "procurador"},
+      "Tomás de Castellar": {"gentilicio": "", "vecindad": "San Germán", "oficio": "", "relacion": ""},
+      "Fernando de Valladolid": {"gentilicio": "", "vecindad": "", "oficio": "procurador causas", "relacion": ""}
+    }
+  }
+}
